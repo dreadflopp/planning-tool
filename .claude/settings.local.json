@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tail:*)",
+      "Bash(python3:*)",
+      "Bash(echo Display available:*)",
+      "Bash(DISPLAY=:0 timeout 10 python3:*)",
+      "Bash(pip install:*)"
+    ]
+  }
+}
