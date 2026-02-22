@@ -3,7 +3,11 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://maps.googleapis.com/maps/api/js?key=API_KEY_PLACEHOLDER&v=3.61&loading=async&callback=initMap" async defer></script>
+    <script
+        src="https://maps.googleapis.com/maps/api/js?key=API_KEY_PLACEHOLDER&v=3.61&loading=async&callback=initMap"
+        async
+        defer
+        onerror="window.__mapScriptLoadError && window.__mapScriptLoadError()"></script>
     <style>
         html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
         .pin-label {
@@ -17,6 +21,15 @@
         let map;
         const pins = {};
         const pendingCalls = [];
+        let mapReady = false;
+
+        window.__mapScriptLoadError = function() {
+            console.error('Google Maps script failed to load. Network, TLS, or API key restrictions may block the request.');
+        };
+
+        window.gm_authFailure = function() {
+            console.error('Google Maps authentication failed (gm_authFailure). Verify Maps JavaScript API is enabled and key restrictions allow embedded/webview usage.');
+        };
         const infoWindows = {};
 
         window.addPin = function(id, lat, lon, name, color, infoContent, textColor, labelOffsetX, labelOffsetY) {
@@ -37,6 +50,7 @@
         };
 
         function initMap() {
+            try {
             map = new google.maps.Map(document.getElementById('map'), {
                 center: { lat: 57.71, lng: 11.97 },
                 zoom: 12,
@@ -143,7 +157,17 @@
                 else if (c[0] === 'zoom') _zoomToPin(c[1], c[2], c[3]);
             });
             pendingCalls.length = 0;
+            mapReady = true;
+            } catch (err) {
+                console.error('initMap failed:', err && err.message ? err.message : err);
+            }
         }
+
+        setTimeout(function() {
+            if (!mapReady) {
+                console.error('Map initialization timeout: initMap callback not completed within 10 seconds.');
+            }
+        }, 10000);
     </script>
 </body>
 </html>
