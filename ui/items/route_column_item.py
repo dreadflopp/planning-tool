@@ -67,6 +67,7 @@ class RouteColumnItem(QGraphicsObject):
         self._all_items: list = []   # ordered sequence for layout
         self.setAcceptDrops(True)
         self._build_children()
+        self._layout_children()
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,6 +112,11 @@ class RouteColumnItem(QGraphicsObject):
 
     def rebuild(self, animate: bool = False):
         """Rebuild child items from the route's current data and re-layout."""
+        old_positions: dict[tuple, list[float]] = {}
+        for item in self._all_items:
+            key = self._item_identity(item)
+            old_positions.setdefault(key, []).append(item.pos().y())
+
         for item in self._visit_items + self._travel_items + self._empty_items:
             item.setParentItem(None)
             if item.scene():
@@ -120,7 +126,10 @@ class RouteColumnItem(QGraphicsObject):
         self._travel_items.clear()
         self._empty_items.clear()
         self._all_items.clear()
-        self._build_children()
+        positioned_item_ids = self._build_children(old_positions=old_positions)
+        if animate:
+            self._prepare_new_visits_fade_in(positioned_item_ids)
+            self._seed_new_item_positions(positioned_item_ids)
         self._layout_children(animate)
         self.update()
 
@@ -191,6 +200,22 @@ class RouteColumnItem(QGraphicsObject):
             if vi.entry.id == entry_id:
                 return vi
         return None
+
+    def pop_visit(self, entry_id: Optional[int] = None, visit_index: Optional[int] = None):
+        visit_item: Optional[VisitItem] = None
+        if entry_id is not None:
+            visit_item = self.visit_item_for_entry(entry_id)
+        elif visit_index is not None:
+            visit_items = [item for item in self._all_items if isinstance(item, VisitItem)]
+            if visit_items:
+                idx = max(0, min(int(visit_index), len(visit_items) - 1))
+                visit_item = visit_items[idx]
+        if visit_item:
+            visit_items = [item for item in self._all_items if isinstance(item, VisitItem)]
+            group_h = 0
+            if visit_item in visit_items:
+                group_h = self._visit_group_height_for_index(visit_items.index(visit_item))
+            visit_item.play_drop_pop(group_h)
 
     # ------------------------------------------------------------------
     # QGraphicsItem
@@ -338,13 +363,52 @@ class RouteColumnItem(QGraphicsObject):
     # Internal
     # ------------------------------------------------------------------
 
-    def _build_children(self):
+    def _item_identity(self, item) -> tuple:
+        if isinstance(item, VisitItem):
+            entry = item.entry
+            return (
+                "visit",
+                entry.id,
+                entry.route_id,
+                entry.visit_id,
+                entry.is_office_instance,
+                entry.office_name,
+                entry.start_time,
+                entry.end_time,
+            )
+        if isinstance(item, TravelItem):
+            seg = item.segment
+            return (
+                "travel",
+                seg.from_entry_id,
+                seg.to_entry_id,
+                seg.mode,
+                seg.travel_minutes,
+            )
+        if isinstance(item, EmptySpaceItem):
+            sp = item.space
+            return (
+                "empty",
+                sp.from_entry_id,
+                sp.to_entry_id,
+                sp.duration_minutes,
+            )
+        return ("unknown", id(item))
+
+    def _build_children(self, old_positions: Optional[dict[tuple, list[float]]] = None) -> set[int]:
+        positioned_item_ids: set[int] = set()
         entries = self._route.sorted_entries()
         for i, entry in enumerate(entries):
             vi = VisitItem(entry, self._font_size, in_route=True, parent=self)
             self._connect_visit_item(vi)
             self._visit_items.append(vi)
             self._all_items.append(vi)
+            if old_positions is not None:
+                key = self._item_identity(vi)
+                ys = old_positions.get(key)
+                if ys:
+                    vi.setPos(QPointF(0, ys.pop(0)))
+                    positioned_item_ids.add(id(vi))
 
             if i < len(entries) - 1:
                 e_next = entries[i + 1]
@@ -354,6 +418,12 @@ class RouteColumnItem(QGraphicsObject):
                     self._connect_travel_item(ti)
                     self._travel_items.append(ti)
                     self._all_items.append(ti)
+                    if old_positions is not None:
+                        key = self._item_identity(ti)
+                        ys = old_positions.get(key)
+                        if ys:
+                            ti.setPos(QPointF(0, ys.pop(0)))
+                            positioned_item_ids.add(id(ti))
 
                 esp = self._route.empty_space_between(entry.id, e_next.id)
                 if self._show_space and esp and esp.duration_minutes > 0:
@@ -361,14 +431,103 @@ class RouteColumnItem(QGraphicsObject):
                     self._connect_empty_item(ei)
                     self._empty_items.append(ei)
                     self._all_items.append(ei)
+                    if old_positions is not None:
+                        key = self._item_identity(ei)
+                        ys = old_positions.get(key)
+                        if ys:
+                            ei.setPos(QPointF(0, ys.pop(0)))
+                            positioned_item_ids.add(id(ei))
+        return positioned_item_ids
 
-        self._layout_children()
+    def _target_positions(self) -> dict[object, float]:
+        hh = self.header_height()
+        y = hh + _PAD
+        out: dict[object, float] = {}
+        for item in self._all_items:
+            out[item] = float(y)
+            y += item.height()
+        return out
+
+    def _seed_new_item_positions(self, positioned_item_ids: set[int]):
+        """Seed items lacking previous positions from nearby anchors to avoid top-fly-in."""
+        targets = self._target_positions()
+        for idx, item in enumerate(self._all_items):
+            if id(item) in positioned_item_ids:
+                continue
+            target_y = targets[item]
+            prev_anchor: Optional[float] = None
+            next_anchor: Optional[float] = None
+
+            for j in range(idx - 1, -1, -1):
+                prev = self._all_items[j]
+                if id(prev) in positioned_item_ids:
+                    prev_anchor = prev.pos().y() + prev.height()
+                    break
+
+            for j in range(idx + 1, len(self._all_items)):
+                nxt = self._all_items[j]
+                if id(nxt) in positioned_item_ids:
+                    next_anchor = nxt.pos().y()
+                    break
+
+            if prev_anchor is not None and next_anchor is not None:
+                seed_y = (prev_anchor + next_anchor - item.height()) / 2.0
+            elif prev_anchor is not None:
+                seed_y = prev_anchor
+            elif next_anchor is not None:
+                seed_y = next_anchor - item.height()
+            else:
+                seed_y = target_y
+
+            if isinstance(item, VisitItem):
+                visit_items = [v for v in self._all_items if isinstance(v, VisitItem)]
+                if item in visit_items:
+                    visit_idx = visit_items.index(item)
+                    group_h = self._visit_group_height_for_index(visit_idx)
+                    max_down = max(0.0, float(group_h - item.height()))
+                    seed_y = max(target_y - 20.0, min(seed_y, target_y + max_down))
+
+            item.setPos(QPointF(0.0, float(seed_y)))
+
+    def _prepare_new_visits_fade_in(self, positioned_item_ids: set[int]):
+        """Place new visit items directly at final Y and fade in after gap motion."""
+        targets = self._target_positions()
+        delay = int(getattr(self._layout, "ANIMATE_DURATION_MS", 280))
+        for item in self._all_items:
+            if not isinstance(item, VisitItem):
+                continue
+            if id(item) in positioned_item_ids:
+                continue
+            target_y = targets[item]
+            item.setPos(QPointF(0.0, float(target_y)))
+            item.play_insert_fade(delay_ms=delay, duration_ms=180)
+            positioned_item_ids.add(id(item))
+
+    def _visit_group_height_for_index(self, visit_index: int) -> int:
+        """Height for one visit bundle: visit + following non-visit blocks until next visit."""
+        visits = [item for item in self._all_items if isinstance(item, VisitItem)]
+        if not visits:
+            return 0
+        idx = max(0, min(int(visit_index), len(visits) - 1))
+        visit_item = visits[idx]
+        try:
+            start = self._all_items.index(visit_item)
+        except ValueError:
+            return visit_item.height()
+
+        total = 0
+        for i in range(start, len(self._all_items)):
+            item = self._all_items[i]
+            if i > start and isinstance(item, VisitItem):
+                break
+            total += item.height()
+        return total
 
     def _layout_children(self, animate: bool = False):
         hh = self.header_height()
         y = hh + _PAD
         for item in self._all_items:
-            item.setPos(QPointF(0, y))
+            self._layout._move_item(item, QPointF(0, y), animate=animate)
             y += item.height()
         self.prepareGeometryChange()
 

@@ -120,6 +120,12 @@ class RouteScene(QGraphicsScene):
         )
         self._reposition_columns(animate=True)
 
+    def pop_visit(self, route_id: int, entry_id: Optional[int] = None, visit_index: Optional[int] = None):
+        col = self._find_column(route_id)
+        if not col:
+            return
+        col.pop_visit(entry_id=entry_id, visit_index=visit_index)
+
     # ------------------------------------------------------------------
     # Drop handling
     # ------------------------------------------------------------------

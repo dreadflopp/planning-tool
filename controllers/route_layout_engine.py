@@ -31,7 +31,7 @@ class RouteLayoutEngine:
         engine.layout_route_column(column_item, route, animate=True)
     """
 
-    ANIMATE_DURATION_MS = 200
+    ANIMATE_DURATION_MS = 280
 
     def __init__(self, font_size: int = 12):
         self._font_size = font_size

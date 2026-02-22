@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional, TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QRectF, Signal, QPointF, QMimeData
+from PySide6.QtCore import Qt, QRectF, Signal, QPointF, QPoint, QMimeData, QVariantAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import (
     QPainter, QPen, QColor, QFont, QBrush, QDrag, QPixmap, QPainterPath, QFontMetrics,
 )
@@ -78,6 +78,11 @@ class VisitItem(QGraphicsObject):
         self._greyed_out = False
         self._highlight_pair = False
         self._selected = False
+        self._is_dragging = False
+        self._pop_strength = 0.0
+        self._pop_animation: Optional[QVariantAnimation] = None
+        self._fade_animation: Optional[QVariantAnimation] = None
+        self._pending_pop_bundle_height: Optional[int] = None
         self._hover_action: Optional[str] = None
         self._drag_start: Optional[QPointF] = None
         self.setAcceptHoverEvents(True)
@@ -110,6 +115,44 @@ class VisitItem(QGraphicsObject):
         if self._selected != selected:
             self._selected = selected
             self.update()
+
+    def play_drop_pop(self, bundle_height: int = 0):
+        if self.opacity() < 0.99:
+            self._pending_pop_bundle_height = int(bundle_height)
+            return
+        if self._pop_animation is not None:
+            self._pop_animation.stop()
+        anim = QVariantAnimation(self)
+        adaptive_duration = max(220, min(380, 180 + int(bundle_height * 0.9)))
+        anim.setDuration(adaptive_duration)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(self._on_pop_value_changed)
+        anim.finished.connect(self._on_pop_finished)
+        self._pop_animation = anim
+        anim.start()
+
+    def play_insert_fade(self, delay_ms: int = 0, duration_ms: int = 180):
+        if self._fade_animation is not None:
+            self._fade_animation.stop()
+        self.setOpacity(0.0)
+
+        def _start_fade():
+            anim = QVariantAnimation(self)
+            anim.setDuration(max(80, int(duration_ms)))
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.valueChanged.connect(lambda v: self.setOpacity(float(v)))
+            anim.finished.connect(self._on_fade_finished)
+            self._fade_animation = anim
+            anim.start()
+
+        if delay_ms > 0:
+            QTimer.singleShot(int(delay_ms), _start_fade)
+        else:
+            _start_fade()
 
     def _text_col_width(self) -> int:
         w = self.width()
@@ -149,7 +192,9 @@ class VisitItem(QGraphicsObject):
         fs = self._font_size
 
         # Background
-        if self._selected:
+        if self._is_dragging:
+            bg = QColor("#E8F4FD")
+        elif self._selected:
             bg = QColor("#E3F2FD")
         elif self._greyed_out:
             bg = QColor(COLOR_GREYED_OUT)
@@ -164,7 +209,9 @@ class VisitItem(QGraphicsObject):
             painter.fillRect(0, 0, _COLOR_STRIP_W, h, strip_color)
 
         # Border: selection > pair highlight > normal
-        if self._selected:
+        if self._is_dragging:
+            pen = QPen(QColor("#42A5F5"), 2, Qt.PenStyle.DashLine)
+        elif self._selected:
             pen = QPen(QColor("#1565C0"), 3)
         elif self._highlight_pair:
             pen = QPen(QColor(COLOR_PAIR_HIGHLIGHT), 3)
@@ -172,6 +219,13 @@ class VisitItem(QGraphicsObject):
             pen = QPen(QColor(COLOR_VISIT_BORDER), 1)
         painter.setPen(pen)
         painter.drawRect(1, 1, w - 2, h - 2)
+
+        if self._pop_strength > 0.0:
+            alpha = int(110 * self._pop_strength)
+            painter.fillRect(2, 2, w - 4, h - 4, QColor(66, 165, 245, alpha))
+            pop_pen = QPen(QColor(21, 101, 192, int(170 * self._pop_strength)), 2)
+            painter.setPen(pop_pen)
+            painter.drawRect(1, 1, w - 2, h - 2)
 
         text_color = QColor("#888888" if self._greyed_out else "#212121")
 
@@ -390,14 +444,18 @@ class VisitItem(QGraphicsObject):
         import json as _json
         from PySide6.QtWidgets import QGraphicsRectItem
 
+        self._is_dragging = True
+        self.setOpacity(0.32)
+        self.update()
+
         # Show ghost placeholder in original position while dragging
         scene = self.scene()
         ghost = None
         if scene:
             ghost = QGraphicsRectItem(QRectF(0, 0, self.width(), self.height()))
             ghost.setPos(self.mapToScene(QPointF(0, 0)))
-            ghost.setBrush(QBrush(QColor(255, 255, 255, 200)))
-            ghost.setPen(QPen(QColor(180, 180, 180, 180), 1, Qt.PenStyle.DashLine))
+            ghost.setBrush(QBrush(QColor(227, 242, 253, 120)))
+            ghost.setPen(QPen(QColor("#42A5F5"), 2, Qt.PenStyle.DashLine))
             ghost.setZValue(10)
             scene.addItem(ghost)
 
@@ -413,18 +471,34 @@ class VisitItem(QGraphicsObject):
         drag.setMimeData(mime)
 
         # Pixmap that follows the cursor
-        pix = QPixmap(self.width(), self.height())
-        pix.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pix)
+        item_pix = QPixmap(self.width(), self.height())
+        item_pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(item_pix)
         self.paint(p, None)
         p.end()
-        drag.setPixmap(pix)
-        drag.setHotSpot(event.pos().toPoint())
-        drag.exec(Qt.DropAction.MoveAction)
 
-        # Remove ghost after drag completes
-        if ghost and ghost.scene():
-            ghost.scene().removeItem(ghost)
+        preview = QPixmap(self.width() + 12, self.height() + 12)
+        preview.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(preview)
+        pp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pp.setOpacity(0.24)
+        pp.drawPixmap(6, 6, item_pix)
+        pp.setOpacity(1.0)
+        pp.drawPixmap(2, 2, item_pix)
+        pp.end()
+
+        drag.setPixmap(preview)
+        drag.setHotSpot(event.pos().toPoint() + QPoint(2, 2))
+
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            # Remove ghost after drag completes
+            if ghost and ghost.scene():
+                ghost.scene().removeItem(ghost)
+            self._is_dragging = False
+            self.setOpacity(1.0)
+            self.update()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -434,3 +508,20 @@ class VisitItem(QGraphicsObject):
     def _hm_to_min(hhmm: str) -> int:
         from controllers.route_recalculation_engine import _t2m
         return _t2m(hhmm)
+
+    def _on_pop_value_changed(self, value):
+        self._pop_strength = float(value)
+        self.update()
+
+    def _on_pop_finished(self):
+        self._pop_strength = 0.0
+        self._pop_animation = None
+        self.update()
+
+    def _on_fade_finished(self):
+        self.setOpacity(1.0)
+        self._fade_animation = None
+        if self._pending_pop_bundle_height is not None:
+            pending = self._pending_pop_bundle_height
+            self._pending_pop_bundle_height = None
+            self.play_drop_pop(pending)

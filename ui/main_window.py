@@ -450,6 +450,8 @@ class MainWindow(QMainWindow):
             self._pool_scene.remove_visit(visit_id)
             self._request_travel_for_new_entry(route, entry)
             self._route_scene.rebuild_route(route)
+            if insert_index is not None:
+                self._route_scene.pop_visit(route_id, visit_index=int(insert_index))
 
         elif dtype == "office":
             duration = max(1, int(data.get("duration_minutes", 10)))
@@ -467,6 +469,8 @@ class MainWindow(QMainWindow):
                 insert_index=insert_index,
             )
             self._route_scene.rebuild_route(route)
+            if insert_index is not None:
+                self._route_scene.pop_visit(route_id, visit_index=int(insert_index))
 
         elif dtype == "route_entry":
             # Move entry from one route to another (or reorder within same)
@@ -495,6 +499,7 @@ class MainWindow(QMainWindow):
                 route.entries = entries
                 self._recalc.recalculate(route)
                 self._route_scene.rebuild_route(route)
+                self._route_scene.pop_visit(route_id, visit_index=adjusted_index)
                 self._autosave.mark_dirty(route.id)
                 return
             src_route = self._routes.get(src_route_id)
@@ -515,6 +520,8 @@ class MainWindow(QMainWindow):
             )
             self._route_scene.rebuild_route(src_route)
             self._route_scene.rebuild_route(route)
+            if insert_index is not None:
+                self._route_scene.pop_visit(route_id, visit_index=int(insert_index))
 
         self._autosave.mark_dirty(route_id)
 
