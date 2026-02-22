@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Optional, Callable
 
 import requests
@@ -22,15 +23,19 @@ _MODE_MAP = {
     TravelMode.WALK: "WALK",
 }
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def _build_request_body(from_address: str, to_address: str, mode: str) -> dict:
     travel_mode = _MODE_MAP.get(mode, "DRIVE")
-    return {
+    body = {
         "origins": [{"waypoint": {"address": from_address + ", Sweden"}}],
         "destinations": [{"waypoint": {"address": to_address + ", Sweden"}}],
         "travelMode": travel_mode,
-        "routingPreference": "TRAFFIC_UNAWARE",
     }
+    if travel_mode == "DRIVE":
+        body["routingPreference"] = "TRAFFIC_UNAWARE"
+    return body
 
 
 class TravelTimeWorker(QThread):
@@ -61,9 +66,18 @@ class TravelTimeWorker(QThread):
             return
 
         body = _build_request_body(self.from_address, self.to_address, self.mode)
+        body_text = json.dumps(body, ensure_ascii=False)
         self.request_logged.emit(
             f"POST {_ROUTE_MATRIX_URL}\n"
-            f"  {self.from_address} → {self.to_address} [{self.mode}]"
+            f"  {self.from_address} → {self.to_address} [{self.mode}]\n"
+            f"  payload: {body_text}"
+        )
+        _LOGGER.debug(
+            "Travel API request %s -> %s [%s] payload=%s",
+            self.from_address,
+            self.to_address,
+            self.mode,
+            body_text,
         )
         try:
             resp = requests.post(
@@ -79,14 +93,32 @@ class TravelTimeWorker(QThread):
         except requests.RequestException as exc:
             msg = f"Network error: {exc}"
             self.response_logged.emit(f"  ERROR: {msg}")
+            _LOGGER.warning(
+                "Travel API network error %s -> %s [%s]: %s",
+                self.from_address,
+                self.to_address,
+                self.mode,
+                msg,
+            )
             self.error_occurred.emit(
                 self.from_address, self.to_address, self.mode, msg
             )
             return
 
+        self.response_logged.emit(
+            f"  HTTP {resp.status_code}: {resp.text[:250]}"
+        )
+
         if resp.status_code != 200:
             msg = f"HTTP {resp.status_code}: {resp.text[:200]}"
             self.response_logged.emit(f"  ERROR: {msg}")
+            _LOGGER.warning(
+                "Travel API HTTP error %s -> %s [%s]: %s",
+                self.from_address,
+                self.to_address,
+                self.mode,
+                msg,
+            )
             self.error_occurred.emit(
                 self.from_address, self.to_address, self.mode, msg
             )
@@ -97,6 +129,12 @@ class TravelTimeWorker(QThread):
         except ValueError:
             msg = "Invalid JSON response"
             self.response_logged.emit(f"  ERROR: {msg}")
+            _LOGGER.warning(
+                "Travel API invalid JSON %s -> %s [%s]",
+                self.from_address,
+                self.to_address,
+                self.mode,
+            )
             self.error_occurred.emit(
                 self.from_address, self.to_address, self.mode, msg
             )
@@ -106,6 +144,13 @@ class TravelTimeWorker(QThread):
         if not isinstance(data, list) or not data:
             msg = f"Unexpected response format: {str(data)[:200]}"
             self.response_logged.emit(f"  ERROR: {msg}")
+            _LOGGER.warning(
+                "Travel API unexpected payload %s -> %s [%s]: %s",
+                self.from_address,
+                self.to_address,
+                self.mode,
+                str(data)[:200],
+            )
             self.error_occurred.emit(
                 self.from_address, self.to_address, self.mode, msg
             )
@@ -116,6 +161,13 @@ class TravelTimeWorker(QThread):
         if status.get("code", 0) != 0:
             msg = f"Route error: {status.get('message', 'unknown')}"
             self.response_logged.emit(f"  ERROR: {msg}")
+            _LOGGER.warning(
+                "Travel API route error %s -> %s [%s]: %s",
+                self.from_address,
+                self.to_address,
+                self.mode,
+                msg,
+            )
             self.error_occurred.emit(
                 self.from_address, self.to_address, self.mode, msg
             )
@@ -128,6 +180,14 @@ class TravelTimeWorker(QThread):
 
         self.response_logged.emit(
             f"  OK: {minutes} min  (raw: {duration_str})"
+        )
+        _LOGGER.debug(
+            "Travel API success %s -> %s [%s]: %s min (raw=%s)",
+            self.from_address,
+            self.to_address,
+            self.mode,
+            minutes,
+            duration_str,
         )
 
         new_usage = self.current_usage + 1
@@ -146,6 +206,7 @@ class TravelTimeService(QObject):
     response_logged = Signal(str)
     error_occurred = Signal(str, str, str, str)
     quota_warning = Signal(int)
+    lookup_started = Signal(str, str, str)
 
     def __init__(self, persistence: PersistenceService, api_key: str,
                  settings, parent=None):
@@ -183,6 +244,8 @@ class TravelTimeService(QObject):
             default = self.get_default_minutes(mode)
             self.travel_time_ready.emit(from_address, to_address, mode, default)
             return
+
+        self.lookup_started.emit(from_address, to_address, mode)
 
         worker = TravelTimeWorker(
             from_address, to_address, mode,

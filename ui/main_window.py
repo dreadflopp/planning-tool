@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from domain.models import (
     Route, RouteEntry, TravelSegment, EmptySpace, Visit,
-    Settings, TravelMode,
+    Settings, TravelMode, TravelTimeState,
 )
 from domain.constants import VISIT_WIDTH, COLUMN_SPACING
 from services.persistence_service import PersistenceService
@@ -86,6 +86,8 @@ class MainWindow(QMainWindow):
         # Import / travel status helpers
         self._import_svc = ExcelImportService(self._db)
         self._travel_status: Optional[TravelStatusDialog] = None
+        self._travel_debounce_timers: dict[tuple[int, int, int], QTimer] = {}
+        self._failed_fallback_keys: set[tuple[str, str, str]] = set()
 
         # Paired visit index: visit_id → partner_visit_id
         self._pairs: dict[int, int] = {}
@@ -264,7 +266,8 @@ class MainWindow(QMainWindow):
         s.travel_mode_changed.connect(self._on_travel_mode_changed)
         s.travel_duration_changed.connect(self._on_travel_duration_changed)
         s.travel_minutes_edit.connect(self._on_travel_minutes_edit)
-        s.travel_restore.connect(self._on_travel_restore)
+        s.travel_retry.connect(self._on_travel_retry)
+        s.travel_source_toggle.connect(self._on_travel_source_toggle)
         s.visit_selected.connect(self._on_route_visit_selected)
 
     def _wire_pool_scene(self):
@@ -523,7 +526,7 @@ class MainWindow(QMainWindow):
             if insert_index is not None:
                 self._route_scene.pop_visit(route_id, visit_index=int(insert_index))
 
-        self._autosave.mark_dirty(route_id)
+        self._autosave.mark_dirty(route.id)
 
     @Slot(int)
     def _on_entry_returned(self, entry_id: int):
@@ -711,11 +714,11 @@ class MainWindow(QMainWindow):
 
         new_end = _t2m(entry.end_time)
         self._recalc.shift_following_entries(route, entry.id, new_end - old_end,
-                                             include_anchor=True)
+                             include_anchor=False)
 
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
-        self._autosave.mark_dirty(route_id)
+        self._autosave.mark_dirty(route.id)
 
     @Slot(int, int, int)
     def _on_entry_duration_changed(self, route_id: int, entry_id: int, delta: int):
@@ -747,7 +750,7 @@ class MainWindow(QMainWindow):
         self._recalc.shift_following_entries(route, entry.id, shift_delta)
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
-        self._autosave.mark_dirty(route_id)
+        self._autosave.mark_dirty(route.id)
 
     @Slot(int, int, int)
     def _on_empty_remove(self, route_id: int, from_entry_id: int, to_entry_id: int):
@@ -765,7 +768,7 @@ class MainWindow(QMainWindow):
                                                  include_anchor=True)
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
-        self._autosave.mark_dirty(route_id)
+        self._autosave.mark_dirty(route.id)
 
     # ------------------------------------------------------------------
     # Travel segment editing
@@ -780,17 +783,15 @@ class MainWindow(QMainWindow):
         if not seg:
             return
         seg.mode = mode
+        seg.api_failed = False
+        seg.api_error = ""
+        seg.is_calculating = False
+        seg.travel_time_state = TravelTimeState.DEFAULT
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route_id)
 
-        # Trigger async API lookup with new mode
-        from_entry = next((e for e in route.entries if e.id == seg.from_entry_id), None)
-        to_entry = next((e for e in route.entries if e.id == seg.to_entry_id), None)
-        if from_entry and to_entry:
-            self._travel_svc.request_travel_time(
-                from_entry.display_address, to_entry.display_address, mode
-            )
+        self._request_segment_travel(route, seg, debounce_ms=700)
 
     @Slot(int, int, int)
     def _on_travel_duration_changed(self, route_id: int, seg_id: int, delta: int):
@@ -808,6 +809,10 @@ class MainWindow(QMainWindow):
             seg.calculated_minutes = old_minutes
         seg.travel_minutes = new_minutes
         seg.is_custom = True
+        seg.travel_time_state = TravelTimeState.EDITED
+        seg.api_failed = False
+        seg.api_error = ""
+        seg.is_calculating = False
 
         shift_delta = change
         if change > 0:
@@ -851,6 +856,10 @@ class MainWindow(QMainWindow):
                 seg.calculated_minutes = old_minutes
             seg.travel_minutes = new_minutes
             seg.is_custom = True
+            seg.travel_time_state = TravelTimeState.EDITED
+            seg.api_failed = False
+            seg.api_error = ""
+            seg.is_calculating = False
 
             shift_delta = change
             if change > 0:
@@ -873,16 +882,72 @@ class MainWindow(QMainWindow):
             self._autosave.mark_dirty(route_id)
 
     @Slot(int, int)
-    def _on_travel_restore(self, route_id: int, seg_id: int):
+    def _on_travel_retry(self, route_id: int, seg_id: int):
         route = self._routes.get(route_id)
         if not route:
             return
         seg = next((s for s in route.travel_segments if s.id == seg_id), None)
         if not seg:
             return
-        self._recalc.restore_calculated_travel(route, seg)
+        self._request_segment_travel(route, seg, debounce_ms=0)
+
+    @Slot(int, int)
+    def _on_travel_source_toggle(self, route_id: int, seg_id: int):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        seg = next((s for s in route.travel_segments if s.id == seg_id), None)
+        if not seg:
+            return
+
+        if seg.travel_time_state == TravelTimeState.EDITED:
+            self._apply_segment_minutes(route, seg,
+                                        self._settings.default_travel_for_mode(seg.mode),
+                                        is_custom=False,
+                                        state=TravelTimeState.DEFAULT)
+            return
+
+        if seg.travel_time_state == TravelTimeState.CALCULATED and not seg.api_failed:
+            self._apply_segment_minutes(route, seg,
+                                        self._settings.default_travel_for_mode(seg.mode),
+                                        is_custom=False,
+                                        state=TravelTimeState.DEFAULT)
+            return
+
+        self._request_segment_travel(route, seg, debounce_ms=0)
+
+    def _apply_segment_minutes(self, route: Route, seg: TravelSegment, minutes: int,
+                               is_custom: bool, state: str):
+        old_minutes = max(0, seg.travel_minutes)
+        new_minutes = max(0, int(minutes))
+        change = new_minutes - old_minutes
+
+        seg.travel_minutes = new_minutes
+        seg.is_custom = is_custom
+        seg.travel_time_state = state
+        seg.api_failed = False
+        seg.api_error = ""
+        seg.is_calculating = False
+
+        shift_delta = change
+        if change > 0:
+            space = route.empty_space_between(seg.from_entry_id, seg.to_entry_id)
+            if space and space.duration_minutes > 0:
+                consume = min(change, space.duration_minutes)
+                space.duration_minutes -= consume
+                if space.duration_minutes <= 0:
+                    route.empty_spaces.remove(space)
+                shift_delta = change - consume
+
+        if shift_delta != 0:
+            to_entry = next((e for e in route.entries if e.id == seg.to_entry_id), None)
+            if to_entry:
+                self._recalc.shift_following_entries(route, to_entry.id, shift_delta,
+                                                     include_anchor=True)
+
+        self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
-        self._autosave.mark_dirty(route_id)
+        self._autosave.mark_dirty(route.id)
 
     # ------------------------------------------------------------------
     # Travel time async result
@@ -892,10 +957,17 @@ class MainWindow(QMainWindow):
     def _on_travel_time_ready(self, from_addr: str, to_addr: str,
                                mode: str, minutes: int):
         """Update any route segments that use this pair."""
+        key = (from_addr, to_addr, mode)
+        from_failed_fallback = key in self._failed_fallback_keys
+        if from_failed_fallback:
+            self._failed_fallback_keys.discard(key)
+
         for route in self._routes.values():
             changed = False
             for seg in route.travel_segments:
                 if seg.is_custom:
+                    continue
+                if not seg.is_calculating:
                     continue
                 from_entry = next(
                     (e for e in route.entries if e.id == seg.from_entry_id), None)
@@ -908,6 +980,11 @@ class MainWindow(QMainWindow):
                         seg.mode == mode):
                     seg.travel_minutes = minutes
                     seg.calculated_minutes = minutes
+                    seg.is_calculating = False
+                    if not from_failed_fallback:
+                        seg.api_failed = False
+                        seg.api_error = ""
+                        seg.travel_time_state = TravelTimeState.CALCULATED
                     changed = True
             if changed:
                 self._recalc.recalculate(route)
@@ -916,12 +993,12 @@ class MainWindow(QMainWindow):
 
     def _connect_travel_signals(self):
         self._travel_svc.travel_time_ready.connect(self._on_travel_time_ready)
+        self._travel_svc.lookup_started.connect(self._on_travel_lookup_started)
         self._travel_svc.request_logged.connect(
             lambda t: self._get_travel_status().log_request(t))
         self._travel_svc.response_logged.connect(
             lambda t: self._get_travel_status().log_response(t))
-        self._travel_svc.error_occurred.connect(
-            lambda f, t, m, e: self._get_travel_status().log_error(f, t, m, e))
+        self._travel_svc.error_occurred.connect(self._on_travel_time_error)
         self._travel_svc.quota_warning.connect(
             lambda c: (self._get_travel_status().log_quota_warning(c),
                        QMessageBox.warning(
@@ -936,15 +1013,86 @@ class MainWindow(QMainWindow):
         idx = next((i for i, e in enumerate(entries) if e.id == new_entry.id), None)
         if idx is None:
             return
-        mode = self._settings.default_travel_mode
         if idx > 0:
             prev = entries[idx - 1]
-            self._travel_svc.request_travel_time(
-                prev.api_address, new_entry.api_address, mode)
+            seg_prev = route.travel_segment_between(prev.id, new_entry.id)
+            if seg_prev:
+                self._request_segment_travel(route, seg_prev, debounce_ms=0)
         if idx < len(entries) - 1:
             nxt = entries[idx + 1]
-            self._travel_svc.request_travel_time(
-                new_entry.api_address, nxt.api_address, mode)
+            seg_next = route.travel_segment_between(new_entry.id, nxt.id)
+            if seg_next:
+                self._request_segment_travel(route, seg_next, debounce_ms=0)
+
+    @Slot(str, str, str)
+    def _on_travel_lookup_started(self, from_addr: str, to_addr: str, mode: str):
+        self._set_segments_lookup_state(from_addr, to_addr, mode, is_calculating=True,
+                                        api_failed=False, api_error="")
+
+    @Slot(str, str, str, str)
+    def _on_travel_time_error(self, from_addr: str, to_addr: str, mode: str, error_msg: str):
+        self._get_travel_status().log_error(from_addr, to_addr, mode, error_msg)
+        self._failed_fallback_keys.add((from_addr, to_addr, mode))
+        self._set_segments_lookup_state(from_addr, to_addr, mode, is_calculating=False,
+                                        api_failed=True, api_error=error_msg)
+
+    def _set_segments_lookup_state(self, from_addr: str, to_addr: str, mode: str,
+                                   is_calculating: bool, api_failed: bool,
+                                   api_error: str = ""):
+        for route in self._routes.values():
+            changed = False
+            for seg in route.travel_segments:
+                from_entry = next((e for e in route.entries if e.id == seg.from_entry_id), None)
+                to_entry = next((e for e in route.entries if e.id == seg.to_entry_id), None)
+                if not from_entry or not to_entry:
+                    continue
+                if (from_entry.api_address == from_addr and
+                        to_entry.api_address == to_addr and
+                        seg.mode == mode):
+                    seg.is_calculating = is_calculating
+                    seg.api_failed = api_failed
+                    seg.api_error = api_error
+                    if api_failed:
+                        seg.travel_time_state = TravelTimeState.DEFAULT
+                    changed = True
+            if changed:
+                self._route_scene.rebuild_route(route)
+
+    def _request_segment_travel(self, route: Route, seg: TravelSegment,
+                                debounce_ms: int = 0):
+        from_entry = next((e for e in route.entries if e.id == seg.from_entry_id), None)
+        to_entry = next((e for e in route.entries if e.id == seg.to_entry_id), None)
+        if not from_entry or not to_entry:
+            return
+
+        from_addr = from_entry.api_address
+        to_addr = to_entry.api_address
+        if not from_addr or not to_addr:
+            return
+
+        seg.is_calculating = True
+        seg.api_failed = False
+        seg.api_error = ""
+        self._route_scene.rebuild_route(route)
+
+        timer_key = (route.id, seg.from_entry_id, seg.to_entry_id)
+        existing = self._travel_debounce_timers.pop(timer_key, None)
+        if existing is not None:
+            existing.stop()
+            existing.deleteLater()
+
+        def _fire_request():
+            self._travel_debounce_timers.pop(timer_key, None)
+            self._travel_svc.request_travel_time(from_addr, to_addr, seg.mode)
+
+        if debounce_ms > 0:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(_fire_request)
+            self._travel_debounce_timers[timer_key] = timer
+            timer.start(int(debounce_ms))
+        else:
+            _fire_request()
 
     @Slot()
     def _on_time_integrity(self):

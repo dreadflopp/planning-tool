@@ -50,7 +50,8 @@ class RouteColumnItem(QGraphicsObject):
     travel_edit_minutes = Signal(object, object)
     travel_duration_up = Signal(object, object)
     travel_duration_dn = Signal(object, object)
-    travel_restore = Signal(object, object)
+    travel_retry = Signal(object, object)
+    travel_source_toggle = Signal(object, object)
     empty_remove = Signal(object, object)
     visit_selected = Signal(object, object)      # (column_item, visit_item)
 
@@ -546,7 +547,8 @@ class RouteColumnItem(QGraphicsObject):
         ti.edit_minutes_requested.connect(lambda t: self.travel_edit_minutes.emit(self, t))
         ti.duration_up_requested.connect(lambda t: self.travel_duration_up.emit(self, t))
         ti.duration_down_requested.connect(lambda t: self.travel_duration_dn.emit(self, t))
-        ti.restore_calculated_requested.connect(lambda t: self.travel_restore.emit(self, t))
+        ti.retry_requested.connect(lambda t: self.travel_retry.emit(self, t))
+        ti.source_toggle_requested.connect(lambda t: self.travel_source_toggle.emit(self, t))
 
     def _connect_empty_item(self, ei: EmptySpaceItem):
         ei.remove_requested.connect(lambda e: self.empty_remove.emit(self, e))

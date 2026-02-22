@@ -14,7 +14,14 @@ Rules:
 
 from __future__ import annotations
 
-from domain.models import Route, RouteEntry, TravelSegment, EmptySpace, TravelMode
+from domain.models import (
+    Route,
+    RouteEntry,
+    TravelSegment,
+    EmptySpace,
+    TravelMode,
+    TravelTimeState,
+)
 from services.persistence_service import PersistenceService
 from services.travel_time_service import TravelTimeService
 
@@ -80,17 +87,22 @@ class RouteRecalculationEngine:
             from_addr = e_from.api_address
             to_addr = e_to.api_address
             mode = self._get_mode(route, e_from.id, e_to.id)
+            seg = route.travel_segment_between(e_from.id, e_to.id)
 
             if from_addr and to_addr and (
                     from_addr == to_addr or
                     e_from.display_address == e_to.display_address):
                 travel_min = 0
             else:
-                cached = self._travel.get_travel_minutes(from_addr, to_addr, mode)
-                travel_min = (
-                    cached if cached is not None
-                    else self._travel.get_default_minutes(mode)
-                )
+                if (seg is not None and not seg.is_custom and
+                        seg.travel_time_state == TravelTimeState.DEFAULT):
+                    travel_min = self._travel.get_default_minutes(mode)
+                else:
+                    cached = self._travel.get_travel_minutes(from_addr, to_addr, mode)
+                    travel_min = (
+                        cached if cached is not None
+                        else self._travel.get_default_minutes(mode)
+                    )
 
             e_from_end = _t2m(e_from.end_time)
             travel_start = e_from_end
@@ -105,7 +117,6 @@ class RouteRecalculationEngine:
                 e_to.end_time = _m2t(target_to_start + duration)
 
             # Update or create TravelSegment
-            seg = route.travel_segment_between(e_from.id, e_to.id)
             if seg is None:
                 seg = TravelSegment(
                     id=None, route_id=route.id,
@@ -116,7 +127,8 @@ class RouteRecalculationEngine:
             else:
                 if not seg.is_custom:
                     seg.travel_minutes = travel_min
-                    seg.calculated_minutes = travel_min
+                    if seg.travel_time_state == TravelTimeState.CALCULATED:
+                        seg.calculated_minutes = travel_min
             seg.start_time = _m2t(travel_start)
             seg.end_time = _m2t(travel_end)
 
@@ -168,17 +180,22 @@ class RouteRecalculationEngine:
             from_addr = e_from.api_address
             to_addr = e_to.api_address
             mode = self._get_mode(route, e_from.id, e_to.id)
+            seg = route.travel_segment_between(e_from.id, e_to.id)
 
             if from_addr and to_addr and (
                     from_addr == to_addr or
                     e_from.display_address == e_to.display_address):
                 travel_min = 0
             else:
-                cached = self._travel.get_travel_minutes(from_addr, to_addr, mode)
-                travel_min = (
-                    cached if cached is not None
-                    else self._travel.get_default_minutes(mode)
-                )
+                if (seg is not None and not seg.is_custom and
+                        seg.travel_time_state == TravelTimeState.DEFAULT):
+                    travel_min = self._travel.get_default_minutes(mode)
+                else:
+                    cached = self._travel.get_travel_minutes(from_addr, to_addr, mode)
+                    travel_min = (
+                        cached if cached is not None
+                        else self._travel.get_default_minutes(mode)
+                    )
 
             e_from_end = _t2m(e_from.end_time)
             travel_start = e_from_end
@@ -194,11 +211,11 @@ class RouteRecalculationEngine:
 
             empty_duration = max(0, e_to_start - earliest_to_start)
 
-            seg = route.travel_segment_between(e_from.id, e_to.id)
             if seg:
                 if not seg.is_custom:
                     seg.travel_minutes = travel_min
-                    seg.calculated_minutes = travel_min
+                    if seg.travel_time_state == TravelTimeState.CALCULATED:
+                        seg.calculated_minutes = travel_min
                 seg.start_time = _m2t(travel_start)
                 seg.end_time = _m2t(travel_end)
 

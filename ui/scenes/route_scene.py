@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Optional, TYPE_CHECKING
 
+import shiboken6
 from PySide6.QtCore import Qt, QPointF, Signal
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsSceneMouseEvent, QGraphicsLineItem, QInputDialog
@@ -40,7 +41,8 @@ class RouteScene(QGraphicsScene):
     travel_mode_changed = Signal(int, int, str)    # (route_id, seg_id, mode)
     travel_duration_changed = Signal(int, int, int) # (route_id, seg_id, delta)
     travel_minutes_edit = Signal(int, int)         # (route_id, seg_id)
-    travel_restore = Signal(int, int)              # (route_id, seg_id)
+    travel_retry = Signal(int, int)                # (route_id, seg_id)
+    travel_source_toggle = Signal(int, int)        # (route_id, seg_id)
     visit_selected = Signal(int, int)              # (route_id, entry_id)
 
     def __init__(self, layout_engine, parent=None):
@@ -56,6 +58,7 @@ class RouteScene(QGraphicsScene):
 
     def load_routes(self, routes: list[Route]):
         self.clear()
+        self._drop_indicator = None
         self._column_items.clear()
         for route in routes:
             self._add_column(route)
@@ -182,6 +185,7 @@ class RouteScene(QGraphicsScene):
                 "type": "office",
                 "name": data["name"],
                 "address": data["address"],
+                "duration_minutes": data.get("duration_minutes", 10),
                 "insert_index": insert_index,
             })
             event.acceptProposedAction()
@@ -250,8 +254,10 @@ class RouteScene(QGraphicsScene):
             lambda c, t: self.travel_duration_changed.emit(c.route.id, t.segment.id, -1))
         col.travel_edit_minutes.connect(
             lambda c, t: self.travel_minutes_edit.emit(c.route.id, t.segment.id))
-        col.travel_restore.connect(
-            lambda c, t: self.travel_restore.emit(c.route.id, t.segment.id))
+        col.travel_retry.connect(
+            lambda c, t: self.travel_retry.emit(c.route.id, t.segment.id))
+        col.travel_source_toggle.connect(
+            lambda c, t: self.travel_source_toggle.emit(c.route.id, t.segment.id))
 
     def _on_rename(self, col: RouteColumnItem):
         text, ok = QInputDialog.getText(
@@ -301,6 +307,8 @@ class RouteScene(QGraphicsScene):
         return next((c for c in self._column_items if c.route.id == route_id), None)
 
     def _show_drop_indicator(self, x: float, y: float, w: float):
+        if self._drop_indicator is not None and not shiboken6.isValid(self._drop_indicator):
+            self._drop_indicator = None
         if self._drop_indicator is None:
             self._drop_indicator = QGraphicsLineItem()
             pen = QPen(QColor("#1565C0"), 3)
@@ -308,9 +316,18 @@ class RouteScene(QGraphicsScene):
             self._drop_indicator.setPen(pen)
             self._drop_indicator.setZValue(200)
             self.addItem(self._drop_indicator)
-        self._drop_indicator.setLine(x, y, x + w, y)
-        self._drop_indicator.setVisible(True)
+        try:
+            self._drop_indicator.setLine(x, y, x + w, y)
+            self._drop_indicator.setVisible(True)
+        except RuntimeError:
+            self._drop_indicator = None
 
     def _hide_drop_indicator(self):
+        if self._drop_indicator is not None and not shiboken6.isValid(self._drop_indicator):
+            self._drop_indicator = None
+            return
         if self._drop_indicator:
-            self._drop_indicator.setVisible(False)
+            try:
+                self._drop_indicator.setVisible(False)
+            except RuntimeError:
+                self._drop_indicator = None

@@ -16,6 +16,12 @@ class TravelMode:
     ALL = ("car", "bike", "walk")
 
 
+class TravelTimeState:
+    DEFAULT = "default"
+    CALCULATED = "calculated"
+    EDITED = "edited"
+
+
 class VisitColor:
     GREEN = "green"
     PINK = "pink"
@@ -124,6 +130,11 @@ class TravelSegment:
     # Computed display times (set by recalculation engine, not persisted)
     start_time: str = ""
     end_time: str = ""
+    # Runtime-only API status (not persisted)
+    is_calculating: bool = field(default=False, compare=False, repr=False)
+    api_failed: bool = field(default=False, compare=False, repr=False)
+    api_error: str = field(default="", compare=False, repr=False)
+    travel_time_state: str = field(default=TravelTimeState.DEFAULT, compare=False, repr=False)
 
 
 @dataclass
