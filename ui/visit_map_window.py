@@ -5,15 +5,17 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
-from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QThread, Signal, Qt, QUrl
 from PySide6.QtWidgets import QLabel, QMainWindow, QVBoxLayout, QWidget
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
 except ImportError:
     QWebEngineView = None
+    QWebEnginePage = None
 
 from domain.models import Visit
 from services.map_geocoding_service import MapGeocodingService
@@ -107,9 +109,25 @@ class _GeocodeWorker(QThread):
         self.finished_ok.emit(markers, errors)
 
 
+if QWebEnginePage is not None:
+    class _MapPage(QWebEnginePage):
+        def __init__(self, log_fn: Optional[Callable[[str], None]], parent=None):
+            super().__init__(parent)
+            self._log_fn = log_fn
+
+        def javaScriptConsoleMessage(self, level, message, line_number, source_id):
+            if self._log_fn is not None:
+                self._log_fn(
+                    f"[Map JS][{level}] {message} (line {line_number}, source: {source_id})"
+                )
+            super().javaScriptConsoleMessage(level, message, line_number, source_id)
+
+
 class VisitMapWindow(QMainWindow):
     def __init__(self, persistence: PersistenceService, api_key: str,
-                 office_address: str, parent=None):
+                 office_address: str,
+                 log_fn: Optional[Callable[[str], None]] = None,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle("Besökskarta")
         self.resize(1100, 700)
@@ -128,6 +146,7 @@ class VisitMapWindow(QMainWindow):
         self._visit_to_key: dict[int, str] = {}
         self._key_to_marker: dict[str, VisitMapMarker] = {}
         self._selected_visit_id: Optional[int] = None
+        self._log_fn = log_fn
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -142,19 +161,43 @@ class VisitMapWindow(QMainWindow):
             return
 
         self._map_view = QWebEngineView()
+        if QWebEnginePage is not None:
+            self._map_view.setPage(_MapPage(self._log, self._map_view))
+        self._map_view.loadStarted.connect(self._on_map_load_started)
+        self._map_view.loadProgress.connect(self._on_map_load_progress)
         self._map_view.loadFinished.connect(self._on_map_load_finished)
+        self._map_view.renderProcessTerminated.connect(self._on_render_process_terminated)
         layout.addWidget(self._map_view, 1)
 
         template_path = os.path.join(os.path.dirname(__file__), "map_template_google.html")
         with open(template_path, "r", encoding="utf-8") as f:
             html = f.read()
         html = html.replace("API_KEY_PLACEHOLDER", (api_key or "").strip())
-        self._map_view.setHtml(html)
+        self._log(
+            f"Map template loaded from: {template_path} | api_key_present={bool((api_key or '').strip())}"
+        )
+        self._map_view.setHtml(html, QUrl("https://maps.googleapis.com/"))
+
+    def _log(self, message: str):
+        if self._log_fn is not None:
+            self._log_fn(message)
+
+    def _on_map_load_started(self):
+        self._log("Map load started")
+
+    def _on_map_load_progress(self, percent: int):
+        if percent in {1, 25, 50, 75, 100}:
+            self._log(f"Map load progress: {percent}%")
 
     def _on_map_load_finished(self, ok: bool):
         self._map_page_ready = bool(ok)
+        self._log(f"Map load finished: ok={ok}")
         if not ok:
-            self._status.setText("Kunde inte ladda kartan.")
+            page_url = ""
+            if self._map_view is not None:
+                page_url = self._map_view.url().toString()
+            self._log(f"Map load failed. page_url={page_url}")
+            self._status.setText("Kunde inte ladda kartan. Se API-status/logg för detaljer.")
             return
         if self._pending_render:
             self._pending_render = False
@@ -173,6 +216,12 @@ class VisitMapWindow(QMainWindow):
                 self._did_initial_office_focus = True
                 return
         self._focus_selected_marker()
+
+    def _on_render_process_terminated(self, termination_status, exit_code: int):
+        self._log(
+            f"Map render process terminated: status={termination_status}, exit_code={exit_code}"
+        )
+        self._status.setText("Kartmotorn avslutades oväntat. Se API-status/logg för detaljer.")
 
     def set_api_key(self, api_key: str):
         self._geocode_service.set_api_key(api_key)

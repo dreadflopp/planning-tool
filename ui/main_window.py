@@ -623,13 +623,22 @@ class MainWindow(QMainWindow):
     def _on_open_map(self):
         if self._map_window is None:
             office_address = self._default_templates[0].get("address", "") if self._default_templates else ""
-            self._map_window = VisitMapWindow(self._db, self._api_key, office_address, self)
+            self._map_window = VisitMapWindow(
+                self._db,
+                self._api_key,
+                office_address,
+                log_fn=self._log_map_message,
+                parent=self,
+            )
             self._map_window.set_color_palette(self._settings.visit_ribbon_color_map())
             self._map_window.destroyed.connect(lambda *_: setattr(self, "_map_window", None))
             self._sync_map_window_visits()
             self._sync_map_selection()
         self._map_window.show()
         self._map_window.raise_()
+
+    def _log_map_message(self, text: str):
+        self._get_travel_status().log_debug(f"[Map] {text}")
 
     def _sync_map_window_visits(self):
         if self._map_window is None:
