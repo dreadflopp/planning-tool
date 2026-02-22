@@ -15,6 +15,7 @@ from domain.constants import (
 )
 from ui.items.pool_column_item import PoolColumnItem
 from ui.items.office_template_item import OfficeTemplateItem
+from ui.items.extra_time_template_item import ExtraTimeTemplateItem
 
 _TEMPLATE_MARGIN = 8
 
@@ -32,6 +33,7 @@ class PoolScene(QGraphicsScene):
         super().__init__(parent)
         self._layout = layout_engine
         self._template_items: list[OfficeTemplateItem] = []
+        self._extra_time_template: Optional[ExtraTimeTemplateItem] = None
         self._column_items: list[PoolColumnItem] = []
         self.setBackgroundBrush(QColor("#ECEFF1"))
 
@@ -43,9 +45,19 @@ class PoolScene(QGraphicsScene):
         self.clear()
         self._column_items.clear()
         self._template_items.clear()
+        self._extra_time_template = None
 
         # Default template visits at top
         for template in templates:
+            if template.get("type") == "extra_time":
+                item = ExtraTimeTemplateItem(
+                    duration_minutes=int(template.get("duration_minutes", 0)),
+                    font_size=self._layout.font_size,
+                )
+                item.setVisible(int(template.get("duration_minutes", 0)) > 0)
+                self.addItem(item)
+                self._extra_time_template = item
+                continue
             item = OfficeTemplateItem(
                 name=template.get("name", "Kontor"),
                 full_address=template.get("address", ""),
@@ -95,9 +107,16 @@ class PoolScene(QGraphicsScene):
     def set_font_size(self, size: int):
         for item in self._template_items:
             item.set_font_size(size)
+        if self._extra_time_template is not None:
+            self._extra_time_template.set_font_size(size)
         for col in self._column_items:
             col.set_font_size(size)
         self._reposition()
+
+    def set_extra_time_minutes(self, minutes: int):
+        if self._extra_time_template is not None:
+            self._extra_time_template.set_duration_minutes(minutes)
+            self._reposition()
 
     def apply_filter(self, active_tags: set[str], mode: str = "or"):
         for col in self._column_items:
@@ -167,7 +186,15 @@ class PoolScene(QGraphicsScene):
             item.setPos(x_t, 0)
             x_t += item.width() + COLUMN_SPACING
             row_h = max(row_h, item.height())
-        template_h = row_h + (_TEMPLATE_MARGIN if self._template_items else 0)
+        if self._extra_time_template is not None:
+            self._extra_time_template.setPos(x_t, 0)
+            if self._extra_time_template.isVisible():
+                x_t += self._extra_time_template.width() + COLUMN_SPACING
+                row_h = max(row_h, self._extra_time_template.height())
+        has_visible_template = bool(self._template_items) or (
+            self._extra_time_template is not None and self._extra_time_template.isVisible()
+        )
+        template_h = row_h + (_TEMPLATE_MARGIN if has_visible_template else 0)
 
         items = sorted(self._column_items,
                        key=lambda c: self._get_column_order(c.street))

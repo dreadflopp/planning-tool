@@ -150,6 +150,14 @@ class EmptySpace:
 
 
 @dataclass
+class ExtraTimeBlock:
+    """Extra time block shown before a visit (except first visit)."""
+    id: Optional[int]
+    route_id: int
+    to_entry_id: int
+
+
+@dataclass
 class Route:
     """A named route column containing ordered visit entries."""
     id: Optional[int]
@@ -160,6 +168,7 @@ class Route:
     entries: list[RouteEntry] = field(default_factory=list, compare=False, repr=False)
     travel_segments: list[TravelSegment] = field(default_factory=list, compare=False, repr=False)
     empty_spaces: list[EmptySpace] = field(default_factory=list, compare=False, repr=False)
+    extra_time_blocks: list[ExtraTimeBlock] = field(default_factory=list, compare=False, repr=False)
 
     def sorted_entries(self) -> list[RouteEntry]:
         return sorted(self.entries, key=lambda e: e.position)
@@ -174,6 +183,12 @@ class Route:
         for esp in self.empty_spaces:
             if esp.from_entry_id == from_id and esp.to_entry_id == to_id:
                 return esp
+        return None
+
+    def extra_time_for_entry(self, to_entry_id: int) -> Optional[ExtraTimeBlock]:
+        for block in self.extra_time_blocks:
+            if block.to_entry_id == to_entry_id:
+                return block
         return None
 
 
@@ -196,6 +211,11 @@ class Settings:
     font_size: int = 12
     api_usage_count: int = 0
     api_usage_limit: int = 10000
+    extra_time_minutes: int = 5
+    extra_time_auto_place: bool = True
+    show_travel_blocks: bool = True
+    show_space_blocks: bool = True
+    show_extra_time_blocks: bool = True
 
     def default_travel_for_mode(self, mode: str) -> int:
         if mode == TravelMode.CAR:

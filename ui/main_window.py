@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from domain.models import (
     Route, RouteEntry, TravelSegment, EmptySpace, Visit,
-    Settings, TravelMode, TravelTimeState,
+    Settings, TravelMode, TravelTimeState, ExtraTimeBlock,
 )
 from domain.constants import VISIT_WIDTH, COLUMN_SPACING
 from services.persistence_service import PersistenceService
@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
             {"name": "Uppstart", "address": self._default_template_address, "duration_minutes": 30},
             {"name": "Rast", "address": self._default_template_address, "duration_minutes": 40},
             {"name": "Avslut", "address": self._default_template_address, "duration_minutes": 20},
+            {"type": "extra_time", "duration_minutes": self._settings.extra_time_minutes},
         ]
 
         # In-memory collections
@@ -78,7 +79,7 @@ class MainWindow(QMainWindow):
 
         # Services / controllers
         self._travel_svc = TravelTimeService(self._db, self._api_key, self._settings)
-        self._recalc = RouteRecalculationEngine(self._db, self._travel_svc)
+        self._recalc = RouteRecalculationEngine(self._db, self._travel_svc, self._settings)
         self._layout_engine = RouteLayoutEngine(self._settings.font_size)
         self._autosave = AutoSaveManager(parent=self)
         self._autosave.save_requested.connect(self._on_autosave)
@@ -212,15 +213,37 @@ class MainWindow(QMainWindow):
 
         self._show_travel_action = QAction("Restid", self)
         self._show_travel_action.setCheckable(True)
-        self._show_travel_action.setChecked(True)
+        self._show_travel_action.setChecked(bool(self._settings.show_travel_blocks))
         self._show_travel_action.toggled.connect(self._on_block_visibility_changed)
         tb.addAction(self._show_travel_action)
 
         self._show_space_action = QAction("Lucka", self)
         self._show_space_action.setCheckable(True)
-        self._show_space_action.setChecked(True)
+        self._show_space_action.setChecked(bool(self._settings.show_space_blocks))
         self._show_space_action.toggled.connect(self._on_block_visibility_changed)
         tb.addAction(self._show_space_action)
+
+        self._show_extra_time_action = QAction("Extratid", self)
+        self._show_extra_time_action.setCheckable(True)
+        self._show_extra_time_action.setChecked(bool(self._settings.show_extra_time_blocks))
+        self._show_extra_time_action.toggled.connect(self._on_block_visibility_changed)
+        tb.addAction(self._show_extra_time_action)
+
+        tb.addSeparator()
+
+        self._extra_time_auto_action = QAction("Auto Extratid", self)
+        self._extra_time_auto_action.setCheckable(True)
+        self._extra_time_auto_action.setChecked(bool(self._settings.extra_time_auto_place))
+        self._extra_time_auto_action.toggled.connect(self._on_extra_time_auto_toggled)
+        tb.addAction(self._extra_time_auto_action)
+
+        tb.addWidget(QLabel(" Extratid: "))
+        self._extra_time_spin = QSpinBox()
+        self._extra_time_spin.setRange(0, 120)
+        self._extra_time_spin.setSuffix(" min")
+        self._extra_time_spin.setValue(max(0, int(self._settings.extra_time_minutes)))
+        self._extra_time_spin.valueChanged.connect(self._on_extra_time_minutes_changed)
+        tb.addWidget(self._extra_time_spin)
 
         tb.addSeparator()
 
@@ -263,6 +286,7 @@ class MainWindow(QMainWindow):
         s.entry_color_changed.connect(self._on_entry_color_changed)
         s.entry_remove_requested.connect(self._on_entry_remove_requested)
         s.empty_remove.connect(self._on_empty_remove)
+        s.extra_time_remove.connect(self._on_extra_time_remove)
         s.travel_mode_changed.connect(self._on_travel_mode_changed)
         s.travel_duration_changed.connect(self._on_travel_duration_changed)
         s.travel_minutes_edit.connect(self._on_travel_minutes_edit)
@@ -285,6 +309,18 @@ class MainWindow(QMainWindow):
         routes = self._db.load_all_routes(self._visits)
         self._routes = {r.id: r for r in routes}
 
+        if self._settings.extra_time_auto_place:
+            for route in routes:
+                if route.extra_time_blocks:
+                    continue
+                entries = route.sorted_entries()
+                for entry in entries[1:]:
+                    route.extra_time_blocks.append(
+                        ExtraTimeBlock(id=None, route_id=route.id, to_entry_id=entry.id)
+                    )
+                if entries:
+                    self._recalc.recalculate(route)
+
         self._compute_pairs()
         self._build_filter_bar()
 
@@ -294,6 +330,9 @@ class MainWindow(QMainWindow):
 
         self._pool_scene.load(self._default_templates, pool_visits)
         self._route_scene.load_routes(routes)
+        self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
+        self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
+        self._on_block_visibility_changed()
 
     def _compute_pairs(self):
         """Find DUBBELBEMANNING 1 / DUBBELBEMANNING 2 pairs."""
@@ -450,6 +489,8 @@ class MainWindow(QMainWindow):
                 self._settings.default_travel_mode,
                 insert_index=insert_index,
             )
+            if self._settings.extra_time_auto_place:
+                self._ensure_extra_time_for_entry(route, entry.id)
             self._pool_scene.remove_visit(visit_id)
             self._request_travel_for_new_entry(route, entry)
             self._route_scene.rebuild_route(route)
@@ -474,6 +515,19 @@ class MainWindow(QMainWindow):
             self._route_scene.rebuild_route(route)
             if insert_index is not None:
                 self._route_scene.pop_visit(route_id, visit_index=int(insert_index))
+
+        elif dtype == "extra_time":
+            if insert_index is None:
+                insert_index = len(route.sorted_entries())
+            entries = route.sorted_entries()
+            if insert_index <= 0 or insert_index >= len(entries):
+                return
+            target = entries[insert_index]
+            self._ensure_extra_time_for_entry(route, target.id)
+            self._recalc.recalculate(route)
+            self._route_scene.rebuild_route(route)
+            self._autosave.mark_dirty(route.id)
+            return
 
         elif dtype == "route_entry":
             # Move entry from one route to another (or reorder within same)
@@ -521,6 +575,8 @@ class MainWindow(QMainWindow):
                 self._settings.default_travel_mode,
                 insert_index=insert_index,
             )
+            if self._settings.extra_time_auto_place and entry.visit_id and not entry.is_office_instance:
+                self._ensure_extra_time_for_entry(route, entry.id)
             self._route_scene.rebuild_route(src_route)
             self._route_scene.rebuild_route(route)
             if insert_index is not None:
@@ -551,6 +607,38 @@ class MainWindow(QMainWindow):
         )
         self._recalc.remove_entry_from_route(route, entry, replace_with_empty=True)
         self._pool_scene.add_visit(v_restored)
+        self._route_scene.rebuild_route(route)
+        self._autosave.mark_dirty(route.id)
+
+    def _ensure_extra_time_for_entry(self, route: Route, to_entry_id: Optional[int]):
+        if not to_entry_id:
+            return
+        entries = route.sorted_entries()
+        idx = next((i for i, e in enumerate(entries) if e.id == to_entry_id), None)
+        if idx is None or idx == 0:
+            return
+        existing = route.extra_time_for_entry(to_entry_id)
+        if existing:
+            return
+        route.extra_time_blocks.append(
+            ExtraTimeBlock(id=None, route_id=route.id, to_entry_id=to_entry_id)
+        )
+
+    def _remove_extra_time_for_entry(self, route: Route, to_entry_id: int):
+        block = route.extra_time_for_entry(to_entry_id)
+        if not block:
+            return
+        route.extra_time_blocks = [
+            b for b in route.extra_time_blocks if b.to_entry_id != to_entry_id
+        ]
+
+    @Slot(int, int)
+    def _on_extra_time_remove(self, route_id: int, to_entry_id: int):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        self._remove_extra_time_for_entry(route, to_entry_id)
+        self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route.id)
 
@@ -629,7 +717,8 @@ class MainWindow(QMainWindow):
             prev = entries[entry_idx - 1]
             seg = route.travel_segment_between(prev.id, entry.id)
             travel = seg.travel_minutes if seg else 0
-            min_start = _t2m(prev.end_time) + travel
+            extra = self._settings.extra_time_minutes if route.extra_time_for_entry(entry.id) else 0
+            min_start = _t2m(prev.end_time) + travel + extra
 
         current_start_abs = _t2m(entry.start_time)
         current_duration = max(1, _t2m(entry.end_time) - _t2m(entry.start_time))
@@ -695,7 +784,8 @@ class MainWindow(QMainWindow):
             prev = entries[entry_idx - 1]
             seg = route.travel_segment_between(prev.id, entry.id)
             travel = seg.travel_minutes if seg else 0
-            base_start = _t2m(prev.end_time) + travel
+            extra = self._settings.extra_time_minutes if route.extra_time_for_entry(entry.id) else 0
+            base_start = _t2m(prev.end_time) + travel + extra
             manual_gap = max(0, new_start - base_start)
             space = route.empty_space_between(prev.id, entry.id)
             if manual_gap > 0:
@@ -1103,10 +1193,32 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_block_visibility_changed(self):
+        self._settings.show_travel_blocks = self._show_travel_action.isChecked()
+        self._settings.show_space_blocks = self._show_space_action.isChecked()
+        self._settings.show_extra_time_blocks = self._show_extra_time_action.isChecked()
         self._route_scene.set_block_visibility(
-            self._show_travel_action.isChecked(),
-            self._show_space_action.isChecked(),
+            self._settings.show_travel_blocks,
+            self._settings.show_space_blocks,
+            self._settings.show_extra_time_blocks,
         )
+        self._autosave.mark_dirty()
+
+    @Slot(bool)
+    def _on_extra_time_auto_toggled(self, checked: bool):
+        self._settings.extra_time_auto_place = bool(checked)
+        self._autosave.mark_dirty()
+
+    @Slot(int)
+    def _on_extra_time_minutes_changed(self, minutes: int):
+        self._settings.extra_time_minutes = max(0, int(minutes))
+        if self._default_templates and self._default_templates[-1].get("type") == "extra_time":
+            self._default_templates[-1]["duration_minutes"] = self._settings.extra_time_minutes
+        self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
+        self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
+        for route in self._routes.values():
+            self._recalc.recalculate(route)
+            self._route_scene.rebuild_route(route)
+        self._autosave.mark_dirty()
 
     @Slot()
     def _on_reset_all(self):
@@ -1125,6 +1237,7 @@ class MainWindow(QMainWindow):
             "route_visit_order": [],
             "travel_segments": [],
             "empty_spaces": [],
+            "extra_time_blocks": [],
             "settings": current_state.get("settings", []),
             "column_order": current_state.get("column_order", []),
             "office_template": current_state.get("office_template", []),
@@ -1222,6 +1335,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self._settings, self._api_key, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._settings = dlg.get_settings()
+            self._recalc.set_settings(self._settings)
             new_key = dlg.get_api_key()
             if new_key != self._api_key:
                 self._api_key = new_key
@@ -1233,6 +1347,8 @@ class MainWindow(QMainWindow):
             idx = self._mode_combo.findData(self._settings.default_travel_mode)
             if idx >= 0:
                 self._mode_combo.setCurrentIndex(idx)
+            self._extra_time_auto_action.setChecked(bool(self._settings.extra_time_auto_place))
+            self._extra_time_spin.setValue(max(0, int(self._settings.extra_time_minutes)))
 
     # ------------------------------------------------------------------
     # State export / import

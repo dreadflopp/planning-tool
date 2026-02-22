@@ -16,6 +16,7 @@ from domain.constants import (
 from ui.items.visit_item import VisitItem
 from ui.items.travel_item import TravelItem
 from ui.items.empty_space_item import EmptySpaceItem
+from ui.items.extra_time_item import ExtraTimeItem
 
 if TYPE_CHECKING:
     from controllers.route_layout_engine import RouteLayoutEngine
@@ -53,6 +54,7 @@ class RouteColumnItem(QGraphicsObject):
     travel_retry = Signal(object, object)
     travel_source_toggle = Signal(object, object)
     empty_remove = Signal(object, object)
+    extra_time_remove = Signal(object, object)
     visit_selected = Signal(object, object)      # (column_item, visit_item)
 
     def __init__(self, route: Route, layout_engine, font_size: int = 12, parent=None):
@@ -62,9 +64,12 @@ class RouteColumnItem(QGraphicsObject):
         self._font_size = font_size
         self._show_travel = True
         self._show_space = True
+        self._show_extra_time = True
+        self._extra_time_minutes = 0
         self._visit_items: list[VisitItem] = []
         self._travel_items: list[TravelItem] = []
         self._empty_items: list[EmptySpaceItem] = []
+        self._extra_time_items: list[ExtraTimeItem] = []
         self._all_items: list = []   # ordered sequence for layout
         self.setAcceptDrops(True)
         self._build_children()
@@ -118,7 +123,7 @@ class RouteColumnItem(QGraphicsObject):
             key = self._item_identity(item)
             old_positions.setdefault(key, []).append(item.pos().y())
 
-        for item in self._visit_items + self._travel_items + self._empty_items:
+        for item in self._visit_items + self._travel_items + self._empty_items + self._extra_time_items:
             item.setParentItem(None)
             if item.scene():
                 item.scene().removeItem(item)
@@ -126,6 +131,7 @@ class RouteColumnItem(QGraphicsObject):
         self._visit_items.clear()
         self._travel_items.clear()
         self._empty_items.clear()
+        self._extra_time_items.clear()
         self._all_items.clear()
         positioned_item_ids = self._build_children(old_positions=old_positions)
         if animate:
@@ -136,17 +142,24 @@ class RouteColumnItem(QGraphicsObject):
 
     def set_font_size(self, size: int):
         self._font_size = size
-        for item in self._visit_items + self._travel_items + self._empty_items:
+        for item in self._visit_items + self._travel_items + self._empty_items + self._extra_time_items:
             item.set_font_size(size)
         self.prepareGeometryChange()
         self._layout_children()
         self.update()
 
-    def set_block_visibility(self, show_travel: bool, show_space: bool):
-        if self._show_travel == show_travel and self._show_space == show_space:
+    def set_block_visibility(self, show_travel: bool, show_space: bool, show_extra_time: bool):
+        if (self._show_travel == show_travel and
+                self._show_space == show_space and
+                self._show_extra_time == show_extra_time):
             return
         self._show_travel = show_travel
         self._show_space = show_space
+        self._show_extra_time = show_extra_time
+        self.rebuild(animate=False)
+
+    def set_extra_time_minutes(self, minutes: int):
+        self._extra_time_minutes = max(0, int(minutes))
         self.rebuild(animate=False)
 
     def apply_filter(self, active_tags: set[str], mode: str = "or"):
@@ -348,7 +361,8 @@ class RouteColumnItem(QGraphicsObject):
     def dragEnterEvent(self, event):
         if (event.mimeData().hasFormat("application/x-pool-visit") or
                 event.mimeData().hasFormat("application/x-route-entry") or
-                event.mimeData().hasFormat("application/x-office-template")):
+                event.mimeData().hasFormat("application/x-office-template") or
+                event.mimeData().hasFormat("application/x-extra-time-template")):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -394,6 +408,12 @@ class RouteColumnItem(QGraphicsObject):
                 sp.to_entry_id,
                 sp.duration_minutes,
             )
+        if isinstance(item, ExtraTimeItem):
+            block = item.block
+            return (
+                "extra_time",
+                block.to_entry_id,
+            )
         return ("unknown", id(item))
 
     def _build_children(self, old_positions: Optional[dict[tuple, list[float]]] = None) -> set[int]:
@@ -425,6 +445,19 @@ class RouteColumnItem(QGraphicsObject):
                         if ys:
                             ti.setPos(QPointF(0, ys.pop(0)))
                             positioned_item_ids.add(id(ti))
+
+                block = self._route.extra_time_for_entry(e_next.id)
+                if block and self._extra_time_minutes > 0 and self._show_extra_time:
+                    xi = ExtraTimeItem(block, self._extra_time_minutes, self._font_size, parent=self)
+                    self._connect_extra_time_item(xi)
+                    self._extra_time_items.append(xi)
+                    self._all_items.append(xi)
+                    if old_positions is not None:
+                        key = self._item_identity(xi)
+                        ys = old_positions.get(key)
+                        if ys:
+                            xi.setPos(QPointF(0, ys.pop(0)))
+                            positioned_item_ids.add(id(xi))
 
                 esp = self._route.empty_space_between(entry.id, e_next.id)
                 if self._show_space and esp and esp.duration_minutes > 0:
@@ -552,3 +585,6 @@ class RouteColumnItem(QGraphicsObject):
 
     def _connect_empty_item(self, ei: EmptySpaceItem):
         ei.remove_requested.connect(lambda e: self.empty_remove.emit(self, e))
+
+    def _connect_extra_time_item(self, xi: ExtraTimeItem):
+        xi.remove_requested.connect(lambda e: self.extra_time_remove.emit(self, e))

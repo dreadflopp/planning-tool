@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QGraphicsScene, QGraphicsSceneMouseEvent, QGraphic
 from domain.models import Route, RouteEntry, TravelMode
 from domain.constants import (
     VISIT_WIDTH, COLUMN_SPACING, MIME_POOL_VISIT, MIME_ROUTE_ENTRY, MIME_OFFICE_TEMPLATE,
+    MIME_EXTRA_TIME_TEMPLATE,
 )
 from ui.items.route_column_item import RouteColumnItem
 
@@ -38,6 +39,7 @@ class RouteScene(QGraphicsScene):
     entry_color_changed = Signal(int, int, object) # (route_id, entry_id, color|None)
     entry_remove_requested = Signal(int, int)      # (route_id, entry_id)
     empty_remove = Signal(int, int, int)           # (route_id, from_entry_id, to_entry_id)
+    extra_time_remove = Signal(int, int)           # (route_id, to_entry_id)
     travel_mode_changed = Signal(int, int, str)    # (route_id, seg_id, mode)
     travel_duration_changed = Signal(int, int, int) # (route_id, seg_id, delta)
     travel_minutes_edit = Signal(int, int)         # (route_id, seg_id)
@@ -50,6 +52,8 @@ class RouteScene(QGraphicsScene):
         self._layout = layout_engine
         self._column_items: list[RouteColumnItem] = []
         self._drop_indicator: Optional[QGraphicsLineItem] = None
+        self._extra_time_minutes = 0
+        self._show_extra_time = True
         self.setBackgroundBrush(QColor("#E0E0E0"))
 
     # ------------------------------------------------------------------
@@ -87,9 +91,16 @@ class RouteScene(QGraphicsScene):
             col.set_font_size(size)
         self._reposition_columns()
 
-    def set_block_visibility(self, show_travel: bool, show_space: bool):
+    def set_block_visibility(self, show_travel: bool, show_space: bool, show_extra_time: bool):
+        self._show_extra_time = bool(show_extra_time)
         for col in self._column_items:
-            col.set_block_visibility(show_travel, show_space)
+            col.set_block_visibility(show_travel, show_space, self._show_extra_time)
+        self._reposition_columns()
+
+    def set_extra_time_minutes(self, minutes: int):
+        self._extra_time_minutes = max(0, int(minutes))
+        for col in self._column_items:
+            col.set_extra_time_minutes(self._extra_time_minutes)
         self._reposition_columns()
 
     def apply_filter(self, active_tags: set[str], mode: str = "or"):
@@ -136,7 +147,8 @@ class RouteScene(QGraphicsScene):
     def dragEnterEvent(self, event):
         if (event.mimeData().hasFormat(MIME_POOL_VISIT) or
                 event.mimeData().hasFormat(MIME_ROUTE_ENTRY) or
-                event.mimeData().hasFormat(MIME_OFFICE_TEMPLATE)):
+                event.mimeData().hasFormat(MIME_OFFICE_TEMPLATE) or
+                event.mimeData().hasFormat(MIME_EXTRA_TIME_TEMPLATE)):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -146,7 +158,8 @@ class RouteScene(QGraphicsScene):
         mime = event.mimeData()
         if (mime.hasFormat(MIME_POOL_VISIT) or
             mime.hasFormat(MIME_OFFICE_TEMPLATE) or
-            mime.hasFormat(MIME_ROUTE_ENTRY)):
+            mime.hasFormat(MIME_ROUTE_ENTRY) or
+            mime.hasFormat(MIME_EXTRA_TIME_TEMPLATE)):
             pos = event.scenePos()
             col = self._column_at(pos)
             if col:
@@ -190,6 +203,16 @@ class RouteScene(QGraphicsScene):
             })
             event.acceptProposedAction()
 
+        elif mime.hasFormat(MIME_EXTRA_TIME_TEMPLATE):
+            data = json.loads(bytes(mime.data(MIME_EXTRA_TIME_TEMPLATE)).decode())
+            insert_index = col.insert_index_for_scene_y(pos.y())
+            self.entry_dropped.emit(col.route.id, {
+                "type": "extra_time",
+                "duration_minutes": data.get("duration_minutes", 0),
+                "insert_index": insert_index,
+            })
+            event.acceptProposedAction()
+
         elif mime.hasFormat(MIME_ROUTE_ENTRY):
             data = json.loads(bytes(mime.data(MIME_ROUTE_ENTRY)).decode())
             insert_index = col.insert_index_for_scene_y(pos.y())
@@ -211,6 +234,8 @@ class RouteScene(QGraphicsScene):
     def _add_column(self, route: Route):
         col = RouteColumnItem(route, self._layout,
                               self._layout.font_size)
+        col.set_block_visibility(True, True, self._show_extra_time)
+        col.set_extra_time_minutes(self._extra_time_minutes)
         self._wire_column(col)
         self.addItem(col)
         self._column_items.append(col)
@@ -245,6 +270,11 @@ class RouteScene(QGraphicsScene):
                 c.route.id,
                 e.space.from_entry_id,
                 e.space.to_entry_id,
+            ))
+        col.extra_time_remove.connect(
+            lambda c, e: self.extra_time_remove.emit(
+                c.route.id,
+                e.block.to_entry_id,
             ))
         col.travel_mode_changed.connect(
             lambda c, t: self.travel_mode_changed.emit(c.route.id, t.segment.id, t.segment.mode))

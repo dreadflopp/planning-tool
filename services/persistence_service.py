@@ -3,11 +3,12 @@
 import json
 import os
 import sqlite3
+import sys
 from typing import Optional
 
 from domain.models import (
     Visit, Route, RouteEntry, TravelSegment, EmptySpace,
-    OfficeTemplate, Settings, TravelMode,
+    OfficeTemplate, Settings, TravelMode, ExtraTimeBlock,
 )
 from domain.constants import DB_FILENAME
 
@@ -70,6 +71,13 @@ CREATE TABLE IF NOT EXISTS empty_spaces (
     UNIQUE(from_entry_id, to_entry_id)
 );
 
+CREATE TABLE IF NOT EXISTS extra_time_blocks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    route_id        INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+    to_entry_id     INTEGER NOT NULL REFERENCES route_visit_order(id) ON DELETE CASCADE,
+    UNIQUE(route_id, to_entry_id)
+);
+
 CREATE TABLE IF NOT EXISTS travel_time_cache (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     from_address  TEXT    NOT NULL,
@@ -115,8 +123,14 @@ INSERT OR IGNORE INTO office_template(id, name, address) VALUES (1, 'Kontor', ''
 class PersistenceService:
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            db_path = os.path.join(os.path.expanduser("~"), ".planning_tool", DB_FILENAME)
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            if getattr(sys, "frozen", False):
+                app_dir = os.path.dirname(os.path.abspath(sys.executable))
+            else:
+                app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            db_path = os.path.join(app_dir, DB_FILENAME)
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         self._path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -148,6 +162,19 @@ class PersistenceService:
                 "ALTER TABLE route_visit_order ADD COLUMN office_color TEXT NOT NULL DEFAULT 'black'"
             )
 
+        cur = self._conn.execute("PRAGMA table_info(extra_time_blocks)")
+        if not cur.fetchall():
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS extra_time_blocks (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    route_id        INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+                    to_entry_id     INTEGER NOT NULL REFERENCES route_visit_order(id) ON DELETE CASCADE,
+                    UNIQUE(route_id, to_entry_id)
+                )
+                """
+            )
+
     def close(self):
         self._conn.close()
 
@@ -176,6 +203,16 @@ class PersistenceService:
                 s.api_usage_count = int(v)
             elif k == "api_usage_limit":
                 s.api_usage_limit = int(v)
+            elif k == "extra_time_minutes":
+                s.extra_time_minutes = int(v)
+            elif k == "extra_time_auto_place":
+                s.extra_time_auto_place = str(v).strip().lower() in {"1", "true", "yes", "on"}
+            elif k == "show_travel_blocks":
+                s.show_travel_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
+            elif k == "show_space_blocks":
+                s.show_space_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
+            elif k == "show_extra_time_blocks":
+                s.show_extra_time_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
         return s
 
     def save_settings(self, s: Settings):
@@ -188,6 +225,11 @@ class PersistenceService:
             ("font_size", str(s.font_size)),
             ("api_usage_count", str(s.api_usage_count)),
             ("api_usage_limit", str(s.api_usage_limit)),
+            ("extra_time_minutes", str(s.extra_time_minutes)),
+            ("extra_time_auto_place", "1" if s.extra_time_auto_place else "0"),
+            ("show_travel_blocks", "1" if s.show_travel_blocks else "0"),
+            ("show_space_blocks", "1" if s.show_space_blocks else "0"),
+            ("show_extra_time_blocks", "1" if s.show_extra_time_blocks else "0"),
         ]
         self._conn.executemany(
             "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", rows
@@ -316,7 +358,22 @@ class PersistenceService:
         for route in routes:
             route.entries = self._load_entries_for_route(route.id, visits_by_id)
             self._load_segments_and_spaces(route)
+            route.extra_time_blocks = self._load_extra_time_blocks_for_route(route.id)
         return routes
+
+    def _load_extra_time_blocks_for_route(self, route_id: int) -> list[ExtraTimeBlock]:
+        rows = self._conn.execute(
+            "SELECT * FROM extra_time_blocks WHERE route_id=?",
+            (route_id,),
+        ).fetchall()
+        return [
+            ExtraTimeBlock(
+                id=r["id"],
+                route_id=r["route_id"],
+                to_entry_id=r["to_entry_id"],
+            )
+            for r in rows
+        ]
 
     def _row_to_route(self, row) -> Route:
         return Route(
@@ -493,6 +550,34 @@ class PersistenceService:
         self._conn.commit()
 
     # ------------------------------------------------------------------
+    # Extra time blocks
+    # ------------------------------------------------------------------
+
+    def upsert_extra_time_block(self, block: ExtraTimeBlock) -> ExtraTimeBlock:
+        cur = self._conn.execute(
+            """INSERT INTO extra_time_blocks(route_id, to_entry_id)
+               VALUES (?, ?)
+               ON CONFLICT(route_id, to_entry_id) DO UPDATE SET
+                 to_entry_id=excluded.to_entry_id""",
+            (block.route_id, block.to_entry_id),
+        )
+        self._conn.commit()
+        if block.id is None:
+            block.id = cur.lastrowid
+        return block
+
+    def delete_extra_time_block(self, route_id: int, to_entry_id: int):
+        self._conn.execute(
+            "DELETE FROM extra_time_blocks WHERE route_id=? AND to_entry_id=?",
+            (route_id, to_entry_id),
+        )
+        self._conn.commit()
+
+    def delete_extra_time_blocks_for_route(self, route_id: int):
+        self._conn.execute("DELETE FROM extra_time_blocks WHERE route_id=?", (route_id,))
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
     # Travel time cache
     # ------------------------------------------------------------------
 
@@ -558,6 +643,9 @@ class PersistenceService:
         state["empty_spaces"] = [
             dict(r) for r in self._conn.execute("SELECT * FROM empty_spaces").fetchall()
         ]
+        state["extra_time_blocks"] = [
+            dict(r) for r in self._conn.execute("SELECT * FROM extra_time_blocks").fetchall()
+        ]
         state["settings"] = [
             dict(r) for r in self._conn.execute("SELECT * FROM settings").fetchall()
         ]
@@ -572,7 +660,7 @@ class PersistenceService:
     def import_state(self, state: dict):
         """Wipe current data (except cache) and load from state dict."""
         tables = ["empty_spaces", "travel_segments", "route_visit_order",
-                  "routes", "visits", "settings", "column_order", "office_template"]
+                  "extra_time_blocks", "routes", "visits", "settings", "column_order", "office_template"]
         for table in tables:
             self._conn.execute(f"DELETE FROM {table}")
 
@@ -606,6 +694,11 @@ class PersistenceService:
             self._conn.execute(
                 "INSERT INTO empty_spaces VALUES "
                 "(:id,:route_id,:from_entry_id,:to_entry_id,:duration_minutes)", row
+            )
+        for row in state.get("extra_time_blocks", []):
+            self._conn.execute(
+                "INSERT INTO extra_time_blocks VALUES "
+                "(:id,:route_id,:to_entry_id)", row
             )
         for row in state.get("settings", []):
             self._conn.execute(

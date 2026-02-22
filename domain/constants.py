@@ -35,6 +35,7 @@ COLOR_GREYED_OUT = "#BDBDBD"       # when filtered out
 MIME_POOL_VISIT = "application/x-pool-visit"
 MIME_ROUTE_ENTRY = "application/x-route-entry"
 MIME_OFFICE_TEMPLATE = "application/x-office-template"
+MIME_EXTRA_TIME_TEMPLATE = "application/x-extra-time-template"
 
 # DB path (relative to working directory or user home)
 DB_FILENAME = "planning_tool.db"

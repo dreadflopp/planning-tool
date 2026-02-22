@@ -21,6 +21,7 @@ from domain.models import (
     EmptySpace,
     TravelMode,
     TravelTimeState,
+    Settings,
 )
 from services.persistence_service import PersistenceService
 from services.travel_time_service import TravelTimeService
@@ -61,9 +62,14 @@ def _display_time(time_value: str) -> str:
 
 class RouteRecalculationEngine:
     def __init__(self, persistence: PersistenceService,
-                 travel_service: TravelTimeService):
+                 travel_service: TravelTimeService,
+                 settings: Settings):
         self._db = persistence
         self._travel = travel_service
+        self._settings = settings
+
+    def set_settings(self, settings: Settings):
+        self._settings = settings
 
     # ------------------------------------------------------------------
     # Public API
@@ -109,7 +115,9 @@ class RouteRecalculationEngine:
             travel_end = travel_start + travel_min
             esp = route.empty_space_between(e_from.id, e_to.id)
             manual_space = max(0, esp.duration_minutes) if esp else 0
-            target_to_start = travel_end + manual_space
+            extra = route.extra_time_for_entry(e_to.id)
+            extra_minutes = self._settings.extra_time_minutes if extra else 0
+            target_to_start = travel_end + extra_minutes + manual_space
 
             duration = _t2m(e_to.end_time) - _t2m(e_to.start_time)
             if _t2m(e_to.start_time) != target_to_start:
@@ -200,7 +208,9 @@ class RouteRecalculationEngine:
             e_from_end = _t2m(e_from.end_time)
             travel_start = e_from_end
             travel_end = travel_start + travel_min
-            earliest_to_start = travel_end
+            extra = route.extra_time_for_entry(e_to.id)
+            extra_minutes = self._settings.extra_time_minutes if extra else 0
+            earliest_to_start = travel_end + extra_minutes
             e_to_start = _t2m(e_to.start_time)
 
             if e_to_start < earliest_to_start:
@@ -445,15 +455,24 @@ class RouteRecalculationEngine:
             s for s in route.empty_spaces
             if (s.from_entry_id, s.to_entry_id) in valid_pairs and s.duration_minutes > 0
         ]
+        valid_to_ids = {entry.id for entry in current_entries}
+        route.extra_time_blocks = [
+            b for b in route.extra_time_blocks
+            if b.to_entry_id in valid_to_ids
+        ]
 
     def _persist(self, route: Route):
         """Write all entries, segments, spaces to DB."""
         self._db.update_all_entries_for_route(route)
         self._db.delete_segments_for_route(route.id)
         self._db.delete_empty_spaces_for_route(route.id)
+        self._db.delete_extra_time_blocks_for_route(route.id)
         for seg in route.travel_segments:
             seg.id = None
             self._db.upsert_travel_segment(seg)
         for esp in route.empty_spaces:
             esp.id = None
             self._db.upsert_empty_space(esp)
+        for block in route.extra_time_blocks:
+            block.id = None
+            self._db.upsert_extra_time_block(block)
