@@ -1,6 +1,7 @@
 """SQLite persistence layer – schema creation and all CRUD operations."""
 
 import json
+import hashlib
 import os
 import sqlite3
 import sys
@@ -89,6 +90,14 @@ CREATE TABLE IF NOT EXISTS travel_time_cache (
     UNIQUE(from_address, to_address, mode)
 );
 
+CREATE TABLE IF NOT EXISTS geocode_cache (
+    address_hash    TEXT PRIMARY KEY,
+    lat             REAL NOT NULL,
+    lng             REAL NOT NULL,
+    formatted_address TEXT NOT NULL DEFAULT '',
+    updated_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -119,6 +128,17 @@ CREATE TABLE IF NOT EXISTS office_template (
 
 INSERT OR IGNORE INTO office_template(id, name, address) VALUES (1, 'Kontor', '');
 """
+
+
+def _hash_text(value: str) -> str:
+    return hashlib.sha256((value or "").strip().encode("utf-8")).hexdigest()
+
+
+def _is_sha256_hex(value: str) -> bool:
+    text = (value or "").strip().lower()
+    if len(text) != 64:
+        return False
+    return all(ch in "0123456789abcdef" for ch in text)
 
 
 class PersistenceService:
@@ -182,6 +202,44 @@ class PersistenceService:
                 )
                 """
             )
+
+            self._migrate_travel_time_cache_hashes()
+
+        cur = self._conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='geocode_cache'")
+        if cur.fetchone():
+            cols = [row[1] for row in self._conn.execute("PRAGMA table_info(geocode_cache)").fetchall()]
+            if "address" in cols and "address_hash" not in cols:
+                self._conn.execute("DROP TABLE geocode_cache")
+                self._conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS geocode_cache (
+                        address_hash      TEXT PRIMARY KEY,
+                        lat               REAL NOT NULL,
+                        lng               REAL NOT NULL,
+                        formatted_address TEXT NOT NULL DEFAULT '',
+                        updated_at        TEXT NOT NULL
+                    )
+                    """
+                )
+
+    def _migrate_travel_time_cache_hashes(self):
+        """Convert plain-text route travel cache addresses to SHA-256 hashes."""
+        rows = self._conn.execute(
+            "SELECT id, from_address, to_address FROM travel_time_cache"
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            row_id = row["id"]
+            old_from = row["from_address"]
+            old_to = row["to_address"]
+            new_from = old_from if _is_sha256_hex(old_from) else _hash_text(old_from)
+            new_to = old_to if _is_sha256_hex(old_to) else _hash_text(old_to)
+            if new_from != old_from or new_to != old_to:
+                self._conn.execute(
+                    "UPDATE travel_time_cache SET from_address=?, to_address=? WHERE id=?",
+                    (new_from, new_to, row_id),
+                )
 
     def close(self):
         self._conn.close()
@@ -634,17 +692,24 @@ class PersistenceService:
     # Travel time cache
     # ------------------------------------------------------------------
 
+    def _travel_cache_hash(self, address: str) -> str:
+        return _hash_text(address)
+
     def get_cached_travel(self, from_addr: str, to_addr: str, mode: str) -> Optional[int]:
+        from_hash = self._travel_cache_hash(from_addr)
+        to_hash = self._travel_cache_hash(to_addr)
         row = self._conn.execute(
             "SELECT travel_minutes FROM travel_time_cache "
             "WHERE from_address=? AND to_address=? AND mode=?",
-            (from_addr, to_addr, mode),
+            (from_hash, to_hash, mode),
         ).fetchone()
         return row["travel_minutes"] if row else None
 
     def set_cached_travel(self, from_addr: str, to_addr: str,
                           mode: str, minutes: int):
         from datetime import datetime
+        from_hash = self._travel_cache_hash(from_addr)
+        to_hash = self._travel_cache_hash(to_addr)
         self._conn.execute(
             """INSERT INTO travel_time_cache
                (from_address, to_address, mode, travel_minutes, calculated_at)
@@ -652,7 +717,41 @@ class PersistenceService:
                ON CONFLICT(from_address, to_address, mode) DO UPDATE SET
                  travel_minutes=excluded.travel_minutes,
                  calculated_at=excluded.calculated_at""",
-            (from_addr, to_addr, mode, minutes, datetime.now().isoformat()),
+            (from_hash, to_hash, mode, minutes, datetime.now().isoformat()),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Geocode cache (address -> lat/lng)
+    # ------------------------------------------------------------------
+
+    def _hash_address(self, address: str) -> str:
+        return _hash_text(address)
+
+    def get_cached_geocode(self, address: str) -> Optional[tuple[float, float, str]]:
+        address_hash = self._hash_address(address)
+        row = self._conn.execute(
+            "SELECT lat, lng, formatted_address FROM geocode_cache WHERE address_hash=?",
+            (address_hash,),
+        ).fetchone()
+        if not row:
+            return None
+        return float(row["lat"]), float(row["lng"]), row["formatted_address"]
+
+    def set_cached_geocode(self, address: str, lat: float, lng: float,
+                           formatted_address: str = ""):
+        from datetime import datetime
+        address_hash = self._hash_address(address)
+        self._conn.execute(
+            """INSERT INTO geocode_cache(address_hash, lat, lng, formatted_address, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(address_hash) DO UPDATE SET
+                 lat=excluded.lat,
+                 lng=excluded.lng,
+                 formatted_address=excluded.formatted_address,
+                 updated_at=excluded.updated_at
+            """,
+            (address_hash, float(lat), float(lng), formatted_address or "", datetime.now().isoformat()),
         )
         self._conn.commit()
 

@@ -33,3 +33,6 @@ logs/
 *.xlsx
 *.xls
 *.pdf
+
+# example repos
+example_repo/
