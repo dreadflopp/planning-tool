@@ -5,10 +5,11 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import re
 from typing import Optional
 
-from PySide6.QtCore import Qt, Slot, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, Slot, QTimer, QRectF
+from PySide6.QtGui import QAction, QColor, QFont, QPageLayout, QPageSize, QPainter, QPdfWriter, QPen
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QToolBar, QLabel, QSpinBox, QComboBox, QPushButton,
@@ -18,9 +19,15 @@ from PySide6.QtWidgets import (
 
 from domain.models import (
     Route, RouteEntry, TravelSegment, EmptySpace, Visit,
-    Settings, TravelMode, TravelTimeState, ExtraTimeBlock,
+    Settings, TravelMode, TravelTimeState, ExtraTimeBlock, VisitColor,
 )
-from domain.constants import VISIT_WIDTH, COLUMN_SPACING
+from domain.constants import (
+    VISIT_WIDTH, COLUMN_SPACING,
+    COLOR_HEADER_BG, COLOR_ROUTE_COLUMN_BG, COLOR_VISIT_BG, COLOR_VISIT_BORDER,
+    COLOR_VISIT_GREEN, COLOR_VISIT_PINK, COLOR_VISIT_BLUE,
+    COLOR_VISIT_RED, COLOR_VISIT_ORANGE, COLOR_VISIT_YELLOW, COLOR_VISIT_BLACK,
+    COLOR_TRAVEL_BG, COLOR_TRAVEL_BORDER, COLOR_EMPTY_BG, COLOR_EMPTY_BORDER,
+)
 from services.persistence_service import PersistenceService
 from services.excel_import_service import ExcelImportService
 from services.travel_time_service import TravelTimeService
@@ -194,6 +201,10 @@ class MainWindow(QMainWindow):
         act_export_excel = QAction("Exportera Excel", self)
         act_export_excel.triggered.connect(self._on_export_excel)
         tb.addAction(act_export_excel)
+
+        act_export_pdf = QAction("Exportera PDF", self)
+        act_export_pdf.triggered.connect(self._on_export_pdf)
+        tb.addAction(act_export_pdf)
 
         tb.addSeparator()
 
@@ -1408,48 +1419,430 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Exportfel", str(exc))
 
+    @Slot()
+    def _on_export_pdf(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportera PDF", "export.pdf",
+            "PDF-filer (*.pdf)"
+        )
+        if not path:
+            return
+        try:
+            self._write_pdf_export(path)
+            QMessageBox.information(self, "Export klar", f"Exporterat till\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Exportfel", str(exc))
+
+    def _to_excel_sheet_name(self, route_name: str, used_names: set[str]) -> str:
+        base = re.sub(r"[\\/*?:\[\]]", "_", (route_name or "").strip())
+        if not base:
+            base = "Rutt"
+        base = base[:31]
+        candidate = base
+        suffix_num = 2
+        while candidate in used_names:
+            suffix = f" ({suffix_num})"
+            candidate = f"{base[:31 - len(suffix)]}{suffix}"
+            suffix_num += 1
+        used_names.add(candidate)
+        return candidate
+
     def _write_excel_export(self, path: str):
         import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.styles import Font, PatternFill
+        from openpyxl.utils import get_column_letter
 
         wb = openpyxl.Workbook()
 
-        # Sheet 1: Routes
-        ws_routes = wb.active
-        ws_routes.title = "Rutter"
-        header_font = Font(bold=True)
-        ws_routes.append(["Rutt", "Anteckningar", "Typ", "Namn", "Adress",
-                           "Starttid", "Sluttid", "Insatser"])
-        ws_routes.row_dimensions[1].font = header_font
+        # Remove default sheet so only route sheets are exported.
+        wb.remove(wb.active)
 
-        for route in sorted(self._routes.values(), key=lambda r: r.display_order):
-            for entry in route.sorted_entries():
-                ws_routes.append([
-                    route.name,
-                    route.notes,
-                    "Kontor" if entry.is_office_instance else "Besök",
-                    entry.display_name,
-                    entry.display_address,
+        header_labels = ["Start", "Slut", "Namn", "Adress", "Insatser"]
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(fill_type="solid", fgColor="4F81BD")
+        odd_fill = PatternFill(fill_type="solid", fgColor="DCE6F1")
+        even_fill = PatternFill(fill_type="solid", fgColor="EDF2F9")
+
+        used_sheet_names: set[str] = set()
+        routes = sorted(self._routes.values(), key=lambda r: r.display_order)
+
+        for route in routes:
+            sheet_name = self._to_excel_sheet_name(route.name, used_sheet_names)
+            ws = wb.create_sheet(sheet_name)
+            ws.append(header_labels)
+
+            for col_idx in range(1, len(header_labels) + 1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.font = header_font
+                cell.fill = header_fill
+
+            for data_idx, entry in enumerate(route.sorted_entries(), start=1):
+                ws.append([
                     _display_time(entry.start_time),
                     _display_time(entry.end_time),
+                    entry.display_name,
+                    entry.display_address,
                     entry.display_insatser,
                 ])
+                row_idx = data_idx + 1
+                row_fill = odd_fill if data_idx % 2 == 1 else even_fill
+                for col_idx in range(1, len(header_labels) + 1):
+                    ws.cell(row=row_idx, column=col_idx).fill = row_fill
 
-        # Sheet 2: Visit pool
-        ws_pool = wb.create_sheet("Besökslista")
-        ws_pool.append(["Gata", "Namn", "Adress", "Starttid", "Sluttid", "Insatser", "Färg"])
-        ws_pool.row_dimensions[1].font = header_font
+            ws.auto_filter.ref = f"A1:E{max(1, ws.max_row)}"
 
-        placed = self._db.get_placed_visit_ids()
-        pool_visits = [v for v in self._visits.values() if v.id not in placed]
-        for v in sorted(pool_visits, key=lambda x: (x.street, x.default_start)):
-            ws_pool.append([
-                v.street, v.name, v.address,
-                v.default_start, v.default_end,
-                v.insatser, v.color or "",
-            ])
+            for col_idx in range(1, len(header_labels) + 1):
+                max_len = 0
+                for row_idx in range(1, ws.max_row + 1):
+                    value = ws.cell(row=row_idx, column=col_idx).value
+                    text = "" if value is None else str(value)
+                    if len(text) > max_len:
+                        max_len = len(text)
+                ws.column_dimensions[get_column_letter(col_idx)].width = max(14, max_len + 2)
+
+        if not routes:
+            ws = wb.create_sheet("Rutter")
+            ws.append(header_labels)
+            for col_idx in range(1, len(header_labels) + 1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.font = header_font
+                cell.fill = header_fill
+            ws.auto_filter.ref = "A1:E1"
 
         wb.save(path)
+
+    def _write_pdf_export(self, path: str):
+        writer = QPdfWriter(path)
+        writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        writer.setPageOrientation(QPageLayout.Orientation.Portrait)
+        writer.setResolution(144)
+
+        painter = QPainter()
+        if not painter.begin(writer):
+            raise RuntimeError("Kunde inte skapa PDF-export.")
+
+        try:
+            page_rect = writer.pageLayout().paintRectPixels(writer.resolution())
+            margin = 36
+            left = page_rect.left() + margin
+            top = page_rect.top() + margin
+            right = page_rect.right() - margin
+            bottom = page_rect.bottom() - margin
+            page_w = right - left
+            page_h = bottom - top
+
+            route_name_font = QFont("Segoe UI", 11, QFont.Weight.Bold)
+            body_font = QFont("Segoe UI", 9)
+            small_font = QFont("Segoe UI", 8)
+
+            color_map = {
+                VisitColor.GREEN: QColor(COLOR_VISIT_GREEN),
+                VisitColor.PINK: QColor(COLOR_VISIT_PINK),
+                VisitColor.BLUE: QColor(COLOR_VISIT_BLUE),
+                VisitColor.RED: QColor(COLOR_VISIT_RED),
+                VisitColor.ORANGE: QColor(COLOR_VISIT_ORANGE),
+                VisitColor.YELLOW: QColor(COLOR_VISIT_YELLOW),
+                VisitColor.BLACK: QColor(COLOR_VISIT_BLACK),
+            }
+
+            column_gap = 18
+            columns_per_page = 2
+            column_w = int((page_w - (column_gap * (columns_per_page - 1))) / columns_per_page)
+
+            header_h = 98
+            visit_h = 72
+            travel_h = 44
+            empty_h = 30
+            extra_h = 30
+            block_gap = 8
+            content_pad = 10
+            left_strip_w = 6
+
+            routes = sorted(self._routes.values(), key=lambda r: r.display_order)
+            if not routes:
+                painter.setFont(route_name_font)
+                painter.setPen(QPen(QColor("#000000")))
+                painter.drawText(
+                    QRectF(left, top, page_w, 40),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    "Inga rutter att exportera",
+                )
+                return
+
+            def draw_route_column(
+                route: Route,
+                x: int,
+                y: int,
+                items_subset: list[tuple[str, object]],
+                continued: bool = False,
+            ):
+                col_h = page_h
+
+                painter.fillRect(QRectF(x, y, column_w, col_h), QColor(COLOR_ROUTE_COLUMN_BG))
+                painter.setPen(QPen(QColor("#B0BEC5"), 1))
+                painter.drawRect(QRectF(x, y, column_w, col_h))
+
+                painter.fillRect(QRectF(x, y, column_w, header_h), QColor(COLOR_HEADER_BG))
+                painter.setPen(QPen(QColor("#CFD8DC"), 1))
+                painter.drawLine(x, y + header_h, x + column_w, y + header_h)
+
+                painter.setPen(QPen(QColor("#212121")))
+                painter.setFont(route_name_font)
+                painter.drawText(
+                    QRectF(x + content_pad, y + 6, column_w - (content_pad * 2), 28),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    f"{route.name or 'Rutt'}{' (forts.)' if continued else ''}",
+                )
+
+                painter.setFont(small_font)
+                painter.setPen(QPen(QColor("#546E7A")))
+                painter.drawText(
+                    QRectF(x + content_pad, y + 36, column_w - (content_pad * 2), 16),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    "Anteckningar:",
+                )
+                painter.setPen(QPen(QColor("#37474F")))
+                painter.drawText(
+                    QRectF(x + content_pad, y + 52, column_w - (content_pad * 2), 40),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+                    route.notes.strip() if route.notes.strip() else "-",
+                )
+
+                row_y = y + header_h + block_gap
+                for item_type, item in items_subset:
+                    if item_type == "travel":
+                        seg = item
+                        is_verklig = bool(
+                            not seg.is_custom
+                            and seg.calculated_minutes is not None
+                            and not seg.api_failed
+                        )
+                        travel_bg = QColor("#E8F5E9") if is_verklig else QColor(COLOR_TRAVEL_BG)
+                        travel_border = QColor("#2E7D32") if is_verklig else QColor(COLOR_TRAVEL_BORDER)
+                        travel_text = QColor("#1B5E20") if is_verklig else QColor("#5D4037")
+                        travel_value = QColor("#2E7D32") if is_verklig else QColor("#1565C0")
+
+                        painter.fillRect(
+                            QRectF(x + content_pad, row_y, column_w - (content_pad * 2), travel_h),
+                            travel_bg,
+                        )
+                        painter.setPen(QPen(travel_border, 1))
+                        painter.drawRect(QRectF(x + content_pad, row_y, column_w - (content_pad * 2), travel_h))
+
+                        mode_label = {
+                            TravelMode.CAR: "Bil",
+                            TravelMode.BIKE: "Cykel",
+                            TravelMode.WALK: "Gång",
+                        }.get(seg.mode, seg.mode)
+                        if seg.is_custom:
+                            source_label = "Redigerad restid"
+                        elif is_verklig:
+                            source_label = "Verklig restid"
+                        else:
+                            source_label = "Standard restid"
+
+                        painter.setFont(small_font)
+                        painter.setPen(QPen(travel_text))
+                        painter.drawText(
+                            QRectF(x + content_pad + 8, row_y + 5, column_w - (content_pad * 2) - 90, 16),
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                            source_label,
+                        )
+                        painter.drawText(
+                            QRectF(x + content_pad + 8, row_y + 22, column_w - (content_pad * 2) - 90, 16),
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                            f"Restid ({mode_label})",
+                        )
+                        painter.setFont(body_font)
+                        painter.setPen(QPen(travel_value))
+                        painter.drawText(
+                            QRectF(x + column_w - content_pad - 80, row_y + 9, 72, 24),
+                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                            f"{seg.travel_minutes} min",
+                        )
+                        row_y += travel_h + block_gap
+                        continue
+
+                    if item_type == "empty":
+                        esp = item
+                        painter.fillRect(
+                            QRectF(x + content_pad, row_y, column_w - (content_pad * 2), empty_h),
+                            QColor(COLOR_EMPTY_BG),
+                        )
+                        painter.setPen(QPen(QColor(COLOR_EMPTY_BORDER), 1))
+                        painter.drawRect(QRectF(x + content_pad, row_y, column_w - (content_pad * 2), empty_h))
+                        painter.setFont(small_font)
+                        painter.setPen(QPen(QColor("#0D47A1")))
+                        painter.drawText(
+                            QRectF(x + content_pad + 8, row_y, column_w - (content_pad * 2) - 16, empty_h),
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                            f"Lucka: {esp.duration_minutes} min",
+                        )
+                        row_y += empty_h + block_gap
+                        continue
+
+                    if item_type == "extra":
+                        painter.fillRect(
+                            QRectF(x + content_pad, row_y, column_w - (content_pad * 2), extra_h),
+                            QColor("#E8F5E9"),
+                        )
+                        painter.setPen(QPen(QColor("#2E7D32"), 1))
+                        painter.drawRect(QRectF(x + content_pad, row_y, column_w - (content_pad * 2), extra_h))
+                        painter.setFont(small_font)
+                        painter.setPen(QPen(QColor("#1B5E20")))
+                        painter.drawText(
+                            QRectF(x + content_pad + 8, row_y, column_w - (content_pad * 2) - 16, extra_h),
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                            f"Extratid: {self._settings.extra_time_minutes} min",
+                        )
+                        row_y += extra_h + block_gap
+                        continue
+
+                    entry = item
+                    painter.fillRect(QRectF(x + content_pad, row_y, column_w - (content_pad * 2), visit_h), QColor(COLOR_VISIT_BG))
+
+                    strip_color = color_map.get(entry.display_color or "", QColor(COLOR_VISIT_BLACK))
+                    painter.fillRect(
+                        QRectF(x + content_pad, row_y, left_strip_w, visit_h),
+                        strip_color,
+                    )
+
+                    painter.setPen(QPen(QColor(COLOR_VISIT_BORDER), 1))
+                    painter.drawRect(QRectF(x + content_pad, row_y, column_w - (content_pad * 2), visit_h))
+
+                    text_x = x + content_pad + left_strip_w + 8
+                    text_w = column_w - (content_pad * 2) - left_strip_w - 86
+
+                    painter.setFont(body_font)
+                    painter.setPen(QPen(QColor("#212121")))
+                    painter.drawText(
+                        QRectF(text_x, row_y + 6, text_w, 22),
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                        entry.display_name,
+                    )
+
+                    painter.setFont(small_font)
+                    painter.setPen(QPen(QColor("#424242")))
+                    painter.drawText(
+                        QRectF(text_x, row_y + 28, text_w, 18),
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                        entry.display_address,
+                    )
+                    painter.drawText(
+                        QRectF(text_x, row_y + 46, text_w, 16),
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                        entry.display_insatser,
+                    )
+
+                    painter.setFont(body_font)
+                    painter.setPen(QPen(QColor("#0D47A1")))
+                    visit_duration = max(0, _t2m(entry.end_time) - _t2m(entry.start_time))
+                    painter.drawText(
+                        QRectF(x + column_w - content_pad - 72, row_y + 8, 68, 22),
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                        _display_time(entry.start_time),
+                    )
+                    painter.drawText(
+                        QRectF(x + column_w - content_pad - 72, row_y + 34, 68, 22),
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                        _display_time(entry.end_time),
+                    )
+                    painter.setFont(small_font)
+                    painter.setPen(QPen(QColor("#1565C0")))
+                    painter.drawText(
+                        QRectF(x + column_w - content_pad - 72, row_y + 52, 68, 16),
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                        f"{visit_duration} min",
+                    )
+
+                    row_y += visit_h + block_gap
+
+            available_h = page_h - header_h - content_pad - block_gap
+
+            route_chunk_map: dict[int, list[list[tuple[str, object]]]] = {}
+            for route in routes:
+                entries = route.sorted_entries()
+
+                route_items: list[tuple[str, object]] = []
+                for idx, entry in enumerate(entries):
+                    if idx > 0:
+                        prev = entries[idx - 1]
+                        if self._settings.show_extra_time_blocks and route.extra_time_for_entry(entry.id):
+                            route_items.append(("extra", route.extra_time_for_entry(entry.id)))
+                        if self._settings.show_travel_blocks:
+                            seg = route.travel_segment_between(prev.id, entry.id)
+                            if seg:
+                                route_items.append(("travel", seg))
+                        if self._settings.show_space_blocks:
+                            esp = route.empty_space_between(prev.id, entry.id)
+                            if esp and esp.duration_minutes > 0:
+                                route_items.append(("empty", esp))
+                    route_items.append(("visit", entry))
+
+                if not route_items:
+                    route_chunk_map[route.id] = [[]]
+                    continue
+
+                current_chunk: list[tuple[str, object]] = []
+                current_h = 0
+                route_chunks: list[list[tuple[str, object]]] = []
+                for item_type, item in route_items:
+                    item_h = visit_h
+                    if item_type == "travel":
+                        item_h = travel_h
+                    elif item_type == "empty":
+                        item_h = empty_h
+                    elif item_type == "extra":
+                        item_h = extra_h
+
+                    block_h = item_h + block_gap
+                    if current_chunk and current_h + block_h > available_h:
+                        route_chunks.append(current_chunk)
+                        current_chunk = []
+                        current_h = 0
+                    current_chunk.append((item_type, item))
+                    current_h += block_h
+
+                if current_chunk:
+                    route_chunks.append(current_chunk)
+
+                route_chunk_map[route.id] = route_chunks
+
+            first_route = True
+            for route in routes:
+                chunks = route_chunk_map.get(route.id, [[]])
+
+                if not first_route:
+                    writer.newPage()
+                first_route = False
+
+                page_local_chunk_idx = 0
+                while page_local_chunk_idx < len(chunks):
+                    if page_local_chunk_idx > 0:
+                        writer.newPage()
+
+                    col_x_left = left
+                    draw_route_column(
+                        route,
+                        col_x_left,
+                        top,
+                        chunks[page_local_chunk_idx],
+                        continued=(page_local_chunk_idx > 0),
+                    )
+                    page_local_chunk_idx += 1
+
+                    if page_local_chunk_idx < len(chunks):
+                        col_x_right = left + (column_w + column_gap)
+                        draw_route_column(
+                            route,
+                            col_x_right,
+                            top,
+                            chunks[page_local_chunk_idx],
+                            continued=(page_local_chunk_idx > 0),
+                        )
+                        page_local_chunk_idx += 1
+        finally:
+            painter.end()
 
     # ------------------------------------------------------------------
     # Auto-save
