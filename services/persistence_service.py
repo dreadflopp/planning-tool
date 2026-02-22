@@ -8,7 +8,7 @@ from typing import Optional
 
 from domain.models import (
     Visit, Route, RouteEntry, TravelSegment, EmptySpace,
-    OfficeTemplate, Settings, TravelMode, ExtraTimeBlock,
+    OfficeTemplate, Settings, TravelMode, ExtraTimeBlock, TravelTimeState,
 )
 from domain.constants import DB_FILENAME
 
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS travel_segments (
     travel_minutes      INTEGER NOT NULL DEFAULT 15,
     is_custom           INTEGER NOT NULL DEFAULT 0,
     calculated_minutes  INTEGER,
+    travel_time_state   TEXT    NOT NULL DEFAULT 'default',
     UNIQUE(from_entry_id, to_entry_id)
 );
 
@@ -162,6 +163,13 @@ class PersistenceService:
                 "ALTER TABLE route_visit_order ADD COLUMN office_color TEXT NOT NULL DEFAULT 'black'"
             )
 
+        cur = self._conn.execute("PRAGMA table_info(travel_segments)")
+        existing_seg_cols = {row[1] for row in cur.fetchall()}
+        if "travel_time_state" not in existing_seg_cols:
+            self._conn.execute(
+                "ALTER TABLE travel_segments ADD COLUMN travel_time_state TEXT NOT NULL DEFAULT 'default'"
+            )
+
         cur = self._conn.execute("PRAGMA table_info(extra_time_blocks)")
         if not cur.fetchall():
             self._conn.execute(
@@ -213,6 +221,29 @@ class PersistenceService:
                 s.show_space_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
             elif k == "show_extra_time_blocks":
                 s.show_extra_time_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
+            elif k == "debug_mode":
+                s.debug_mode = str(v).strip().lower() in {"1", "true", "yes", "on"}
+            elif k == "file_logging_enabled":
+                s.file_logging_enabled = str(v).strip().lower() in {"1", "true", "yes", "on"}
+            elif k == "file_logging_retention_days":
+                try:
+                    s.file_logging_retention_days = max(1, int(v))
+                except Exception:
+                    s.file_logging_retention_days = 30
+            elif k == "visit_color_blue":
+                s.visit_color_blue = str(v)
+            elif k == "visit_color_green":
+                s.visit_color_green = str(v)
+            elif k == "visit_color_pink":
+                s.visit_color_pink = str(v)
+            elif k == "visit_color_red":
+                s.visit_color_red = str(v)
+            elif k == "visit_color_orange":
+                s.visit_color_orange = str(v)
+            elif k == "visit_color_yellow":
+                s.visit_color_yellow = str(v)
+            elif k == "visit_color_black":
+                s.visit_color_black = str(v)
         return s
 
     def save_settings(self, s: Settings):
@@ -230,6 +261,16 @@ class PersistenceService:
             ("show_travel_blocks", "1" if s.show_travel_blocks else "0"),
             ("show_space_blocks", "1" if s.show_space_blocks else "0"),
             ("show_extra_time_blocks", "1" if s.show_extra_time_blocks else "0"),
+            ("debug_mode", "1" if s.debug_mode else "0"),
+            ("file_logging_enabled", "1" if s.file_logging_enabled else "0"),
+            ("file_logging_retention_days", str(max(1, int(s.file_logging_retention_days)))),
+            ("visit_color_blue", str(s.visit_color_blue)),
+            ("visit_color_green", str(s.visit_color_green)),
+            ("visit_color_pink", str(s.visit_color_pink)),
+            ("visit_color_red", str(s.visit_color_red)),
+            ("visit_color_orange", str(s.visit_color_orange)),
+            ("visit_color_yellow", str(s.visit_color_yellow)),
+            ("visit_color_black", str(s.visit_color_black)),
         ]
         self._conn.executemany(
             "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", rows
@@ -418,6 +459,16 @@ class PersistenceService:
                 mode=r["mode"], travel_minutes=r["travel_minutes"],
                 is_custom=bool(r["is_custom"]),
                 calculated_minutes=r["calculated_minutes"],
+                travel_time_state=(
+                    r["travel_time_state"]
+                    if "travel_time_state" in r.keys() and r["travel_time_state"]
+                    else (
+                        TravelTimeState.EDITED if bool(r["is_custom"]) else (
+                            TravelTimeState.CALCULATED if r["calculated_minutes"] is not None
+                            else TravelTimeState.DEFAULT
+                        )
+                    )
+                ),
             )
             for r in rows
         ]
@@ -505,14 +556,16 @@ class PersistenceService:
         cur = self._conn.execute(
             """INSERT INTO travel_segments
                (route_id, from_entry_id, to_entry_id, mode, travel_minutes,
-                is_custom, calculated_minutes)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                 is_custom, calculated_minutes, travel_time_state)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(from_entry_id, to_entry_id) DO UPDATE SET
                  mode=excluded.mode, travel_minutes=excluded.travel_minutes,
                  is_custom=excluded.is_custom,
-                 calculated_minutes=excluded.calculated_minutes""",
+                  calculated_minutes=excluded.calculated_minutes,
+                  travel_time_state=excluded.travel_time_state""",
             (seg.route_id, seg.from_entry_id, seg.to_entry_id,
-             seg.mode, seg.travel_minutes, int(seg.is_custom), seg.calculated_minutes),
+               seg.mode, seg.travel_minutes, int(seg.is_custom),
+               seg.calculated_minutes, seg.travel_time_state),
         )
         self._conn.commit()
         if seg.id is None:
@@ -685,10 +738,17 @@ class PersistenceService:
                 ":is_office_instance,:office_name,:office_address,:office_color)", row
             )
         for row in state.get("travel_segments", []):
+            if "travel_time_state" not in row:
+                row["travel_time_state"] = (
+                    TravelTimeState.EDITED if bool(row.get("is_custom")) else (
+                        TravelTimeState.CALCULATED if row.get("calculated_minutes") is not None
+                        else TravelTimeState.DEFAULT
+                    )
+                )
             self._conn.execute(
                 "INSERT INTO travel_segments VALUES "
                 "(:id,:route_id,:from_entry_id,:to_entry_id,:mode,:travel_minutes,"
-                ":is_custom,:calculated_minutes)", row
+                ":is_custom,:calculated_minutes,:travel_time_state)", row
             )
         for row in state.get("empty_spaces", []):
             self._conn.execute(

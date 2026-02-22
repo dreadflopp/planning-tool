@@ -68,6 +68,7 @@ class VisitItem(QGraphicsObject):
     selected = Signal(object)             # emits self on any left click
     color_change_requested = Signal(object, object)  # (self, color|None)
     remove_requested = Signal(object)     # emits self
+    _color_hex: dict[str, str] = dict(_COLOR_HEX)
 
     def __init__(self, entry: RouteEntry, font_size: int = 12,
                  in_route: bool = True, parent=None):
@@ -78,6 +79,7 @@ class VisitItem(QGraphicsObject):
         self._greyed_out = False
         self._highlight_pair = False
         self._selected = False
+        self._inconsistent = False
         self._is_dragging = False
         self._pop_strength = 0.0
         self._pop_animation: Optional[QVariantAnimation] = None
@@ -87,6 +89,19 @@ class VisitItem(QGraphicsObject):
         self._drag_start: Optional[QPointF] = None
         self.setAcceptHoverEvents(True)
         self.setCacheMode(QGraphicsObject.CacheMode.DeviceCoordinateCache)
+
+    @classmethod
+    def set_color_palette(cls, palette: dict[str, str]):
+        merged = dict(_COLOR_HEX)
+        for key, value in (palette or {}).items():
+            color = QColor(str(value))
+            if color.isValid():
+                merged[str(key)] = color.name().upper()
+        cls._color_hex = merged
+
+    @classmethod
+    def color_palette(cls) -> dict[str, str]:
+        return dict(cls._color_hex)
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,6 +129,11 @@ class VisitItem(QGraphicsObject):
     def set_selected(self, selected: bool):
         if self._selected != selected:
             self._selected = selected
+            self.update()
+
+    def set_inconsistent(self, inconsistent: bool):
+        if self._inconsistent != inconsistent:
+            self._inconsistent = inconsistent
             self.update()
 
     def play_drop_pop(self, bundle_height: int = 0):
@@ -205,11 +225,13 @@ class VisitItem(QGraphicsObject):
         # Color strip (left edge)
         color_key = self._entry.display_color
         if color_key and not self._greyed_out:
-            strip_color = QColor(_COLOR_HEX.get(color_key, COLOR_VISIT_BG))
+            strip_color = QColor(self._color_hex.get(color_key, COLOR_VISIT_BG))
             painter.fillRect(0, 0, _COLOR_STRIP_W, h, strip_color)
 
         # Border: selection > pair highlight > normal
-        if self._is_dragging:
+        if self._inconsistent:
+            pen = QPen(QColor("#C62828"), 3)
+        elif self._is_dragging:
             pen = QPen(QColor("#42A5F5"), 2, Qt.PenStyle.DashLine)
         elif self._selected:
             pen = QPen(QColor("#1565C0"), 3)

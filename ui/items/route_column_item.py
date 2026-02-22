@@ -66,6 +66,9 @@ class RouteColumnItem(QGraphicsObject):
         self._show_space = True
         self._show_extra_time = True
         self._extra_time_minutes = 0
+        self._inconsistent_entry_ids: set[int] = set()
+        self._inconsistent_travel_pairs: set[tuple[int, int]] = set()
+        self._inconsistent_empty_pairs: set[tuple[int, int]] = set()
         self._visit_items: list[VisitItem] = []
         self._travel_items: list[TravelItem] = []
         self._empty_items: list[EmptySpaceItem] = []
@@ -182,6 +185,23 @@ class RouteColumnItem(QGraphicsObject):
     def set_selected_entry(self, entry_id: Optional[int]):
         for vi in self._visit_items:
             vi.set_selected(entry_id is not None and vi.entry.id == entry_id)
+
+    def set_inconsistent_entries(self, entry_ids: set[int]):
+        self._inconsistent_entry_ids = set(entry_ids or set())
+        for vi in self._visit_items:
+            vi.set_inconsistent(bool(vi.entry.id in self._inconsistent_entry_ids))
+
+    def set_inconsistent_blocks(self,
+                                travel_pairs: set[tuple[int, int]],
+                                empty_pairs: set[tuple[int, int]]):
+        self._inconsistent_travel_pairs = set(travel_pairs or set())
+        self._inconsistent_empty_pairs = set(empty_pairs or set())
+        for ti in self._travel_items:
+            key = (ti.segment.from_entry_id, ti.segment.to_entry_id)
+            ti.set_inconsistent(key in self._inconsistent_travel_pairs)
+        for ei in self._empty_items:
+            key = (ei.space.from_entry_id, ei.space.to_entry_id)
+            ei.set_inconsistent(key in self._inconsistent_empty_pairs)
 
     def drop_indicator_y(self, scene_y: float) -> float:
         """Return scene-Y for the drop indicator line given a scene drag position."""
@@ -421,6 +441,7 @@ class RouteColumnItem(QGraphicsObject):
         entries = self._route.sorted_entries()
         for i, entry in enumerate(entries):
             vi = VisitItem(entry, self._font_size, in_route=True, parent=self)
+            vi.set_inconsistent(bool(entry.id in self._inconsistent_entry_ids))
             self._connect_visit_item(vi)
             self._visit_items.append(vi)
             self._all_items.append(vi)
@@ -436,6 +457,9 @@ class RouteColumnItem(QGraphicsObject):
                 seg = self._route.travel_segment_between(entry.id, e_next.id)
                 if self._show_travel and seg and seg.travel_minutes > 0:
                     ti = TravelItem(seg, self._font_size, parent=self)
+                    ti.set_inconsistent(
+                        (seg.from_entry_id, seg.to_entry_id) in self._inconsistent_travel_pairs
+                    )
                     self._connect_travel_item(ti)
                     self._travel_items.append(ti)
                     self._all_items.append(ti)
@@ -462,6 +486,9 @@ class RouteColumnItem(QGraphicsObject):
                 esp = self._route.empty_space_between(entry.id, e_next.id)
                 if self._show_space and esp and esp.duration_minutes > 0:
                     ei = EmptySpaceItem(esp, self._font_size, parent=self)
+                    ei.set_inconsistent(
+                        (esp.from_entry_id, esp.to_entry_id) in self._inconsistent_empty_pairs
+                    )
                     self._connect_empty_item(ei)
                     self._empty_items.append(ei)
                     self._all_items.append(ei)

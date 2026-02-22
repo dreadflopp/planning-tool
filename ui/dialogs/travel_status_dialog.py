@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+import os
+import sys
+
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QLabel,
@@ -24,6 +28,11 @@ class TravelStatusDialog(QDialog):
             Qt.WindowType.WindowMinimizeButtonHint
         )
         self.resize(560, 400)
+        self._log_dir = self._resolve_log_dir()
+        self._file_logging_enabled = True
+        self._file_logging_retention_days = 30
+        self._ensure_log_dir_exists()
+        self._cleanup_old_logs()
 
         layout = QVBoxLayout(self)
 
@@ -58,9 +67,31 @@ class TravelStatusDialog(QDialog):
     @Slot(int)
     def log_quota_warning(self, count: int):
         self._append(
-            f"  ⚠ API-användning: {count} anrop (närmar sig gränsen!)",
+            f"  ⚠ API usage: {count} requests (approaching limit)",
             "#E65100",
         )
+
+    @Slot(str)
+    def log_debug(self, text: str):
+        self._append(f"• {text}", "#6A1B9A")
+
+    @Slot(str)
+    def log_integrity_warning(self, text: str):
+        self._append(f"  ⚠ {text}", "#C62828")
+
+    @Slot(str)
+    def log_integrity_ok(self, text: str):
+        self._append(f"  ✓ {text}", "#2E7D32")
+
+    @Slot(str)
+    def log_integrity_change(self, text: str):
+        self._append(f"  ↺ {text}", "#1565C0")
+
+    def configure_file_logging(self, enabled: bool, retention_days: int):
+        self._file_logging_enabled = bool(enabled)
+        self._file_logging_retention_days = max(1, int(retention_days))
+        self._ensure_log_dir_exists()
+        self._cleanup_old_logs()
 
     def _append(self, text: str, hex_color: str):
         fmt = QTextCharFormat()
@@ -70,3 +101,49 @@ class TravelStatusDialog(QDialog):
         cursor.insertText(text + "\n", fmt)
         self._log.setTextCursor(cursor)
         self._log.ensureCursorVisible()
+        self._append_to_file(text)
+
+    def _resolve_log_dir(self) -> str:
+        if getattr(sys, "frozen", False):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return os.path.join(base_dir, "logs")
+
+    def _ensure_log_dir_exists(self):
+        try:
+            os.makedirs(self._log_dir, exist_ok=True)
+        except Exception:
+            pass
+
+    def _append_to_file(self, text: str):
+        if not self._file_logging_enabled:
+            return
+        try:
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            filename = datetime.now().strftime("planning-tool-%Y-%m-%d.log")
+            file_path = os.path.join(self._log_dir, filename)
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(f"[{stamp}] {text}\n")
+        except Exception:
+            # File logging must never break the UI logging path.
+            pass
+
+    def _cleanup_old_logs(self):
+        try:
+            now_ts = datetime.now().timestamp()
+            max_age_seconds = max(1, int(self._file_logging_retention_days)) * 86400
+            for name in os.listdir(self._log_dir):
+                if not (name.startswith("planning-tool-") and name.endswith(".log")):
+                    continue
+                path = os.path.join(self._log_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                age_seconds = now_ts - os.path.getmtime(path)
+                if age_seconds > max_age_seconds:
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+        except Exception:
+            pass

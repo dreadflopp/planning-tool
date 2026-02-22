@@ -94,21 +94,9 @@ class RouteRecalculationEngine:
             to_addr = e_to.api_address
             mode = self._get_mode(route, e_from.id, e_to.id)
             seg = route.travel_segment_between(e_from.id, e_to.id)
-
-            if from_addr and to_addr and (
-                    from_addr == to_addr or
-                    e_from.display_address == e_to.display_address):
-                travel_min = 0
-            else:
-                if (seg is not None and not seg.is_custom and
-                        seg.travel_time_state == TravelTimeState.DEFAULT):
-                    travel_min = self._travel.get_default_minutes(mode)
-                else:
-                    cached = self._travel.get_travel_minutes(from_addr, to_addr, mode)
-                    travel_min = (
-                        cached if cached is not None
-                        else self._travel.get_default_minutes(mode)
-                    )
+            travel_min = self._resolve_pair_travel_minutes(
+                e_from, e_to, seg, mode, from_addr, to_addr
+            )
 
             e_from_end = _t2m(e_from.end_time)
             travel_start = e_from_end
@@ -133,7 +121,7 @@ class RouteRecalculationEngine:
                 )
                 route.travel_segments.append(seg)
             else:
-                if not seg.is_custom:
+                if not seg.is_custom and not seg.is_calculating:
                     seg.travel_minutes = travel_min
                     if seg.travel_time_state == TravelTimeState.CALCULATED:
                         seg.calculated_minutes = travel_min
@@ -189,21 +177,9 @@ class RouteRecalculationEngine:
             to_addr = e_to.api_address
             mode = self._get_mode(route, e_from.id, e_to.id)
             seg = route.travel_segment_between(e_from.id, e_to.id)
-
-            if from_addr and to_addr and (
-                    from_addr == to_addr or
-                    e_from.display_address == e_to.display_address):
-                travel_min = 0
-            else:
-                if (seg is not None and not seg.is_custom and
-                        seg.travel_time_state == TravelTimeState.DEFAULT):
-                    travel_min = self._travel.get_default_minutes(mode)
-                else:
-                    cached = self._travel.get_travel_minutes(from_addr, to_addr, mode)
-                    travel_min = (
-                        cached if cached is not None
-                        else self._travel.get_default_minutes(mode)
-                    )
+            travel_min = self._resolve_pair_travel_minutes(
+                e_from, e_to, seg, mode, from_addr, to_addr
+            )
 
             e_from_end = _t2m(e_from.end_time)
             travel_start = e_from_end
@@ -222,7 +198,7 @@ class RouteRecalculationEngine:
             empty_duration = max(0, e_to_start - earliest_to_start)
 
             if seg:
-                if not seg.is_custom:
+                if not seg.is_custom and not seg.is_calculating:
                     seg.travel_minutes = travel_min
                     if seg.travel_time_state == TravelTimeState.CALCULATED:
                         seg.calculated_minutes = travel_min
@@ -441,6 +417,31 @@ class RouteRecalculationEngine:
         if cached is not None:
             return cached
         return self._travel.get_default_minutes(seg.mode)
+
+    def _resolve_pair_travel_minutes(self,
+                                     from_entry: RouteEntry,
+                                     to_entry: RouteEntry,
+                                     seg: TravelSegment | None,
+                                     mode: str,
+                                     from_addr: str,
+                                     to_addr: str) -> int:
+        if from_addr and to_addr and (
+                from_addr == to_addr or
+                from_entry.display_address == to_entry.display_address):
+            return 0
+
+        if seg is not None:
+            if seg.is_custom:
+                return max(0, int(seg.travel_minutes))
+            if seg.is_calculating:
+                return max(0, int(seg.travel_minutes))
+            if seg.travel_time_state == TravelTimeState.DEFAULT:
+                return self._travel.get_default_minutes(mode)
+
+        cached = self._travel.get_travel_minutes(from_addr, to_addr, mode)
+        if cached is not None:
+            return cached
+        return self._travel.get_default_minutes(mode)
 
     def _prune_stale(self, route: Route, current_entries: list[RouteEntry]):
         valid_pairs = {

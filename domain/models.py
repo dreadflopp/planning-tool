@@ -42,6 +42,17 @@ class VisitColor:
     }
 
 
+def _normalize_hex_color(value: str, fallback: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return fallback
+    if not text.startswith("#"):
+        text = f"#{text}"
+    if len(text) == 7 and all(ch in "0123456789ABCDEFabcdef" for ch in text[1:]):
+        return text.upper()
+    return fallback
+
+
 # ---------------------------------------------------------------------------
 # Core domain objects
 # ---------------------------------------------------------------------------
@@ -216,6 +227,16 @@ class Settings:
     show_travel_blocks: bool = True
     show_space_blocks: bool = True
     show_extra_time_blocks: bool = True
+    debug_mode: bool = False
+    file_logging_enabled: bool = True
+    file_logging_retention_days: int = 30
+    visit_color_blue: str = "#1F99CD"
+    visit_color_green: str = "#3DB28D"
+    visit_color_pink: str = "#EE229F"
+    visit_color_red: str = "#D64545"
+    visit_color_orange: str = "#F39C3D"
+    visit_color_yellow: str = "#E6C84F"
+    visit_color_black: str = "#2B2B2B"
 
     def default_travel_for_mode(self, mode: str) -> int:
         if mode == TravelMode.CAR:
@@ -223,3 +244,23 @@ class Settings:
         if mode == TravelMode.BIKE:
             return self.default_travel_bike
         return self.default_travel_walk
+
+    def visit_ribbon_color_map(self) -> dict[str, str]:
+        defaults = {
+            VisitColor.BLUE: "#1F99CD",
+            VisitColor.GREEN: "#3DB28D",
+            VisitColor.PINK: "#EE229F",
+            VisitColor.RED: "#D64545",
+            VisitColor.ORANGE: "#F39C3D",
+            VisitColor.YELLOW: "#E6C84F",
+            VisitColor.BLACK: "#2B2B2B",
+        }
+        return {
+            VisitColor.BLUE: _normalize_hex_color(self.visit_color_blue, defaults[VisitColor.BLUE]),
+            VisitColor.GREEN: _normalize_hex_color(self.visit_color_green, defaults[VisitColor.GREEN]),
+            VisitColor.PINK: _normalize_hex_color(self.visit_color_pink, defaults[VisitColor.PINK]),
+            VisitColor.RED: _normalize_hex_color(self.visit_color_red, defaults[VisitColor.RED]),
+            VisitColor.ORANGE: _normalize_hex_color(self.visit_color_orange, defaults[VisitColor.ORANGE]),
+            VisitColor.YELLOW: _normalize_hex_color(self.visit_color_yellow, defaults[VisitColor.YELLOW]),
+            VisitColor.BLACK: _normalize_hex_color(self.visit_color_black, defaults[VisitColor.BLACK]),
+        }

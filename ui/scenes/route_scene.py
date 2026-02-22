@@ -54,6 +54,9 @@ class RouteScene(QGraphicsScene):
         self._drop_indicator: Optional[QGraphicsLineItem] = None
         self._extra_time_minutes = 0
         self._show_extra_time = True
+        self._inconsistent_entry_ids_by_route: dict[int, set[int]] = {}
+        self._inconsistent_travel_pairs_by_route: dict[int, set[tuple[int, int]]] = {}
+        self._inconsistent_empty_pairs_by_route: dict[int, set[tuple[int, int]]] = {}
         self.setBackgroundBrush(QColor("#E0E0E0"))
 
     # ------------------------------------------------------------------
@@ -84,7 +87,37 @@ class RouteScene(QGraphicsScene):
         if item:
             item._route = route
             item.rebuild(animate)
+            item.set_inconsistent_entries(self._inconsistent_entry_ids_by_route.get(route.id, set()))
+            item.set_inconsistent_blocks(
+                self._inconsistent_travel_pairs_by_route.get(route.id, set()),
+                self._inconsistent_empty_pairs_by_route.get(route.id, set()),
+            )
             self._reposition_columns(animate)
+
+    def set_inconsistent_entries(self, by_route: dict[int, set[int]]):
+        self._inconsistent_entry_ids_by_route = {
+            int(route_id): set(entry_ids)
+            for route_id, entry_ids in (by_route or {}).items()
+        }
+        for col in self._column_items:
+            col.set_inconsistent_entries(self._inconsistent_entry_ids_by_route.get(col.route.id, set()))
+
+    def set_inconsistent_blocks(self,
+                                travel_by_route: dict[int, set[tuple[int, int]]],
+                                empty_by_route: dict[int, set[tuple[int, int]]]):
+        self._inconsistent_travel_pairs_by_route = {
+            int(route_id): set(pairs)
+            for route_id, pairs in (travel_by_route or {}).items()
+        }
+        self._inconsistent_empty_pairs_by_route = {
+            int(route_id): set(pairs)
+            for route_id, pairs in (empty_by_route or {}).items()
+        }
+        for col in self._column_items:
+            col.set_inconsistent_blocks(
+                self._inconsistent_travel_pairs_by_route.get(col.route.id, set()),
+                self._inconsistent_empty_pairs_by_route.get(col.route.id, set()),
+            )
 
     def set_font_size(self, size: int):
         for col in self._column_items:
@@ -236,6 +269,11 @@ class RouteScene(QGraphicsScene):
                               self._layout.font_size)
         col.set_block_visibility(True, True, self._show_extra_time)
         col.set_extra_time_minutes(self._extra_time_minutes)
+        col.set_inconsistent_entries(self._inconsistent_entry_ids_by_route.get(route.id, set()))
+        col.set_inconsistent_blocks(
+            self._inconsistent_travel_pairs_by_route.get(route.id, set()),
+            self._inconsistent_empty_pairs_by_route.get(route.id, set()),
+        )
         self._wire_column(col)
         self.addItem(col)
         self._column_items.append(col)

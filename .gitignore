@@ -18,8 +18,18 @@ env/
 .vscode/
 .idea/
 *.swp
+.claude/
 
 # App data
 *.db
 *.db-shm
 *.db-wal
+
+# Runtime logs
+logs/
+*.log
+
+# Exports
+*.xlsx
+*.xls
+*.pdf

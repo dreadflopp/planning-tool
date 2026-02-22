@@ -32,6 +32,7 @@ class TravelItem(QGraphicsObject):
         self._seg = segment
         self._font_size = font_size
         self._hover_action = None
+        self._inconsistent = False
         self._spinner_phase = 0
         self._spinner_timer = QTimer(self)
         self._spinner_timer.setInterval(260)
@@ -48,6 +49,11 @@ class TravelItem(QGraphicsObject):
         self._font_size = size
         self.prepareGeometryChange()
         self.update()
+
+    def set_inconsistent(self, inconsistent: bool):
+        if self._inconsistent != inconsistent:
+            self._inconsistent = inconsistent
+            self.update()
 
     def _on_spinner_tick(self):
         self._spinner_phase = (self._spinner_phase + 1) % 4
@@ -108,7 +114,7 @@ class TravelItem(QGraphicsObject):
         arrow_hover_color = QColor("#66BB6A") if is_calc else QColor("#42A5F5")
 
         painter.fillRect(0, 0, w, h, bg)
-        pen = QPen(border_color, 1)
+        pen = QPen(QColor("#C62828"), 2) if self._inconsistent else QPen(border_color, 1)
         painter.setPen(pen)
         painter.drawRect(1, 1, w - 2, h - 2)
 

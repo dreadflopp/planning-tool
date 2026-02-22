@@ -24,6 +24,7 @@ class EmptySpaceItem(QGraphicsObject):
         super().__init__(parent)
         self._space = space
         self._font_size = font_size
+        self._inconsistent = False
         self.setCacheMode(QGraphicsObject.CacheMode.DeviceCoordinateCache)
 
     @property
@@ -34,6 +35,11 @@ class EmptySpaceItem(QGraphicsObject):
         self._font_size = size
         self.prepareGeometryChange()
         self.update()
+
+    def set_inconsistent(self, inconsistent: bool):
+        if self._inconsistent != inconsistent:
+            self._inconsistent = inconsistent
+            self.update()
 
     def height(self) -> int:
         if self._space.duration_minutes == 0:
@@ -55,7 +61,8 @@ class EmptySpaceItem(QGraphicsObject):
         fs = self._font_size
 
         painter.fillRect(0, 0, w, h, QColor(COLOR_EMPTY_BG))
-        painter.setPen(QPen(QColor(COLOR_EMPTY_BORDER), 1))
+        border_pen = QPen(QColor("#C62828"), 2) if self._inconsistent else QPen(QColor(COLOR_EMPTY_BORDER), 1)
+        painter.setPen(border_pen)
         painter.drawRect(1, 1, w - 2, h - 2)
 
         painter.setFont(QFont("Segoe UI", max(fs - 3, 7)))

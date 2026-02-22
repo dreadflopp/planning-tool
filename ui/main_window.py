@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import configparser
+import functools
+import inspect
 import json
 import os
 import re
+from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import Qt, Slot, QTimer, QRectF
@@ -19,13 +22,11 @@ from PySide6.QtWidgets import (
 
 from domain.models import (
     Route, RouteEntry, TravelSegment, EmptySpace, Visit,
-    Settings, TravelMode, TravelTimeState, ExtraTimeBlock, VisitColor,
+    Settings, TravelMode, TravelTimeState, ExtraTimeBlock,
 )
 from domain.constants import (
     VISIT_WIDTH, COLUMN_SPACING,
     COLOR_HEADER_BG, COLOR_ROUTE_COLUMN_BG, COLOR_VISIT_BG, COLOR_VISIT_BORDER,
-    COLOR_VISIT_GREEN, COLOR_VISIT_PINK, COLOR_VISIT_BLUE,
-    COLOR_VISIT_RED, COLOR_VISIT_ORANGE, COLOR_VISIT_YELLOW, COLOR_VISIT_BLACK,
     COLOR_TRAVEL_BG, COLOR_TRAVEL_BORDER, COLOR_EMPTY_BG, COLOR_EMPTY_BORDER,
 )
 from services.persistence_service import PersistenceService
@@ -41,6 +42,7 @@ from ui.views.pool_view import PoolView
 from ui.flow_layout import FlowLayout
 from ui.dialogs.settings_dialog import SettingsDialog
 from ui.dialogs.travel_status_dialog import TravelStatusDialog
+from ui.items.visit_item import VisitItem
 
 
 _SETTINGS_FILE = "settings.ini"
@@ -70,6 +72,7 @@ class MainWindow(QMainWindow):
 
         self._db = persistence
         self._settings: Settings = self._db.load_settings()
+        self._apply_visit_color_palette()
         self._api_key: str = _load_api_key()
         self._default_template_address = "Angereds Torg 5, 424 65 Angered"
         self._default_templates = [
@@ -99,11 +102,249 @@ class MainWindow(QMainWindow):
 
         # Paired visit index: visit_id → partner_visit_id
         self._pairs: dict[int, int] = {}
+        self._debug_action_depth = 0
+        self._debug_wrappers_installed = False
+        self._bootstrap_complete = False
+
+        self._install_debug_action_wrappers()
 
         # Build UI
         self._build_ui()
         self._load_data()
         self._connect_travel_signals()
+        self._bootstrap_complete = True
+        if self._settings.debug_mode:
+            self._run_debug_integrity_scan("Init")
+
+    def _install_debug_action_wrappers(self):
+        if self._debug_wrappers_installed:
+            return
+
+        action_methods = {
+            "_on_filter_changed",
+            "_on_add_route",
+            "_on_route_renamed",
+            "_on_route_notes_changed",
+            "_on_route_delete",
+            "_on_entry_dropped",
+            "_on_entry_returned",
+            "_on_extra_time_remove",
+            "_on_entry_color_changed",
+            "_on_entry_remove_requested",
+            "_on_entry_moved",
+            "_on_entry_time_edit",
+            "_on_entry_duration_changed",
+            "_on_empty_remove",
+            "_on_travel_mode_changed",
+            "_on_travel_duration_changed",
+            "_on_travel_minutes_edit",
+            "_on_travel_retry",
+            "_on_travel_source_toggle",
+            "_on_time_integrity",
+            "_on_block_visibility_changed",
+            "_on_extra_time_auto_toggled",
+            "_on_extra_time_minutes_changed",
+            "_on_reset_all",
+            "_on_default_mode_changed",
+            "_on_font_size_changed",
+            "_on_import_excel",
+            "_on_open_settings",
+            "_on_export_state",
+            "_on_import_state",
+            "_on_export_excel",
+            "_on_export_pdf",
+        }
+
+        for name in action_methods:
+            fn = getattr(self, name, None)
+            if not callable(fn):
+                continue
+
+            sig = inspect.signature(fn)
+            positional_params = [
+                p for p in sig.parameters.values()
+                if p.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            has_var_positional = any(
+                p.kind == inspect.Parameter.VAR_POSITIONAL
+                for p in sig.parameters.values()
+            )
+            max_positional = len(positional_params)
+
+            @functools.wraps(fn)
+            def _wrapped(*args,
+                         __fn=fn,
+                         __name=name,
+                         __has_var_positional=has_var_positional,
+                         __max_positional=max_positional,
+                         **kwargs):
+                call_args = args if __has_var_positional else args[:__max_positional]
+                self._debug_action_depth += 1
+                try:
+                    result = __fn(*call_args, **kwargs)
+                finally:
+                    self._debug_action_depth = max(0, self._debug_action_depth - 1)
+                if self._debug_action_depth == 0:
+                    self._on_debug_post_action(__name, call_args, kwargs)
+                return result
+
+            setattr(self, name, _wrapped)
+
+        self._debug_wrappers_installed = True
+
+    def _on_debug_post_action(self, action_name: str, args: tuple, kwargs: dict):
+        if not self._settings.debug_mode:
+            return
+        if not self._bootstrap_complete:
+            return
+        stamp = datetime.now().strftime("%H:%M:%S")
+        args_text = self._format_debug_args(args, kwargs)
+        self._get_travel_status().log_debug(
+            f"[{stamp}] {action_name}{args_text}"
+        )
+        self._run_debug_integrity_scan(action_name)
+
+    def _format_debug_args(self, args: tuple, kwargs: dict) -> str:
+        parts: list[str] = []
+        for arg in args:
+            text = repr(arg)
+            if len(text) > 80:
+                text = text[:77] + "..."
+            parts.append(text)
+        for k, v in kwargs.items():
+            text = repr(v)
+            if len(text) > 80:
+                text = text[:77] + "..."
+            parts.append(f"{k}={text}")
+        return f"({', '.join(parts)})" if parts else "()"
+
+    def _run_debug_integrity_scan(self, trigger: str, log_result: bool = True):
+        by_route, travel_by_route, empty_by_route, issues = self._scan_time_inconsistencies()
+        self._route_scene.set_inconsistent_entries(by_route)
+        self._route_scene.set_inconsistent_blocks(travel_by_route, empty_by_route)
+        if not log_result:
+            return
+        if issues:
+            self._get_travel_status().log_integrity_warning(
+                f"{trigger}: {len(issues)} time anomalies"
+            )
+            for issue in issues[:50]:
+                self._get_travel_status().log_integrity_warning(issue)
+            if len(issues) > 50:
+                self._get_travel_status().log_integrity_warning(
+                    f"... and {len(issues) - 50} more"
+                )
+        else:
+            self._get_travel_status().log_integrity_ok(f"{trigger}: no time anomalies")
+
+    def _scan_time_inconsistencies(self) -> tuple[
+        dict[int, set[int]],
+        dict[int, set[tuple[int, int]]],
+        dict[int, set[tuple[int, int]]],
+        list[str],
+    ]:
+        inconsistent_by_route: dict[int, set[int]] = {}
+        inconsistent_travel_by_route: dict[int, set[tuple[int, int]]] = {}
+        inconsistent_empty_by_route: dict[int, set[tuple[int, int]]] = {}
+        issues: list[str] = []
+
+        for route in sorted(self._routes.values(), key=lambda r: r.display_order):
+            bad_entries: set[int] = set()
+            bad_travel_pairs: set[tuple[int, int]] = set()
+            bad_empty_pairs: set[tuple[int, int]] = set()
+            entries = route.sorted_entries()
+
+            for entry in entries:
+                start_m = _t2m(entry.start_time)
+                end_m = _t2m(entry.end_time)
+                if end_m <= start_m:
+                    if entry.id is not None:
+                        bad_entries.add(entry.id)
+                    issues.append(
+                        f"{route.name}: invalid duration for '{entry.display_name}' ({_display_time(entry.start_time)}–{_display_time(entry.end_time)})"
+                    )
+
+            for idx in range(1, len(entries)):
+                prev = entries[idx - 1]
+                curr = entries[idx]
+                seg = route.travel_segment_between(prev.id, curr.id)
+                esp = route.empty_space_between(prev.id, curr.id)
+                extra = route.extra_time_for_entry(curr.id)
+
+                if seg is not None and seg.is_calculating:
+                    # Ignore transient state while API travel update is in flight.
+                    continue
+
+                travel_min = max(0, seg.travel_minutes) if seg else 0
+                empty_min = max(0, esp.duration_minutes) if esp else 0
+                extra_min = self._settings.extra_time_minutes if extra else 0
+
+                expected_start = _t2m(prev.end_time) + travel_min + extra_min + empty_min
+                actual_start = _t2m(curr.start_time)
+
+                if actual_start != expected_start:
+                    pair_key = (prev.id, curr.id)
+                    if prev.id is not None:
+                        bad_entries.add(prev.id)
+                    if curr.id is not None:
+                        bad_entries.add(curr.id)
+                    bad_travel_pairs.add(pair_key)
+                    bad_empty_pairs.add(pair_key)
+                    issues.append(
+                        f"{route.name}: '{curr.display_name}' starts at { _display_time(curr.start_time) } but expected { _display_time(_m2t(expected_start)) }"
+                    )
+
+                if seg is not None:
+                    # TravelSegment start/end are runtime display fields and may be
+                    # blank right after app startup before recalculation.
+                    # Only validate these fields when both are populated.
+                    if seg.start_time and seg.end_time:
+                        expected_seg_start = _t2m(prev.end_time)
+                        expected_seg_end = expected_seg_start + travel_min
+                        seg_start = _t2m(seg.start_time)
+                        seg_end = _t2m(seg.end_time)
+                        if seg_start != expected_seg_start or seg_end != expected_seg_end:
+                            pair_key = (prev.id, curr.id)
+                            if prev.id is not None:
+                                bad_entries.add(prev.id)
+                            if curr.id is not None:
+                                bad_entries.add(curr.id)
+                            bad_travel_pairs.add(pair_key)
+                            issues.append(
+                                f"{route.name}: travel block {prev.display_name} → {curr.display_name} is inconsistent"
+                            )
+
+                if esp is not None:
+                    expected_empty_start = _t2m(prev.end_time) + travel_min + extra_min
+                    expected_empty_end = expected_empty_start + empty_min
+                    esp_start = _t2m(esp.start_time)
+                    esp_end = _t2m(esp.end_time)
+                    if esp_start != expected_empty_start or esp_end != expected_empty_end:
+                        pair_key = (prev.id, curr.id)
+                        if prev.id is not None:
+                            bad_entries.add(prev.id)
+                        if curr.id is not None:
+                            bad_entries.add(curr.id)
+                        bad_empty_pairs.add(pair_key)
+                        issues.append(
+                            f"{route.name}: gap block {prev.display_name} → {curr.display_name} is inconsistent"
+                        )
+
+            if bad_entries:
+                inconsistent_by_route[route.id] = bad_entries
+            if bad_travel_pairs:
+                inconsistent_travel_by_route[route.id] = bad_travel_pairs
+            if bad_empty_pairs:
+                inconsistent_empty_by_route[route.id] = bad_empty_pairs
+
+        return inconsistent_by_route, inconsistent_travel_by_route, inconsistent_empty_by_route, issues
+
+    def _clear_debug_integrity_marks(self):
+        self._route_scene.set_inconsistent_entries({})
+        self._route_scene.set_inconsistent_blocks({}, {})
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1095,6 +1336,8 @@ class MainWindow(QMainWindow):
                 self._recalc.recalculate(route)
                 self._route_scene.rebuild_route(route)
                 self._autosave.mark_dirty(route.id)
+        if self._settings.debug_mode:
+            self._run_debug_integrity_scan("travel_time_ready", log_result=False)
 
     def _connect_travel_signals(self):
         self._travel_svc.travel_time_ready.connect(self._on_travel_time_ready)
@@ -1133,6 +1376,8 @@ class MainWindow(QMainWindow):
     def _on_travel_lookup_started(self, from_addr: str, to_addr: str, mode: str):
         self._set_segments_lookup_state(from_addr, to_addr, mode, is_calculating=True,
                                         api_failed=False, api_error="")
+        if self._settings.debug_mode:
+            self._run_debug_integrity_scan("travel_lookup_started", log_result=False)
 
     @Slot(str, str, str, str)
     def _on_travel_time_error(self, from_addr: str, to_addr: str, mode: str, error_msg: str):
@@ -1140,6 +1385,8 @@ class MainWindow(QMainWindow):
         self._failed_fallback_keys.add((from_addr, to_addr, mode))
         self._set_segments_lookup_state(from_addr, to_addr, mode, is_calculating=False,
                                         api_failed=True, api_error=error_msg)
+        if self._settings.debug_mode:
+            self._run_debug_integrity_scan("travel_time_error", log_result=False)
 
     def _set_segments_lookup_state(self, from_addr: str, to_addr: str, mode: str,
                                    is_calculating: bool, api_failed: bool,
@@ -1201,10 +1448,104 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_time_integrity(self):
+        before = self._capture_integrity_snapshot()
         for route in self._routes.values():
             self._recalc.recalculate(route)
             self._route_scene.rebuild_route(route)
+        after = self._capture_integrity_snapshot()
+        self._log_integrity_changes(before, after)
         self._autosave.flush_now()
+
+    def _capture_integrity_snapshot(self) -> dict:
+        snapshot: dict = {
+            "entries": {},
+            "segments": {},
+            "spaces": {},
+        }
+        for route in self._routes.values():
+            for entry in route.entries:
+                if entry.id is None:
+                    continue
+                snapshot["entries"][entry.id] = (
+                    route.id,
+                    route.name,
+                    entry.display_name,
+                    entry.start_time,
+                    entry.end_time,
+                )
+            for seg in route.travel_segments:
+                if seg.id is None:
+                    continue
+                snapshot["segments"][seg.id] = (
+                    route.id,
+                    route.name,
+                    seg.from_entry_id,
+                    seg.to_entry_id,
+                    seg.mode,
+                    seg.travel_minutes,
+                    seg.start_time,
+                    seg.end_time,
+                )
+            for esp in route.empty_spaces:
+                if esp.id is None:
+                    continue
+                snapshot["spaces"][esp.id] = (
+                    route.id,
+                    route.name,
+                    esp.from_entry_id,
+                    esp.to_entry_id,
+                    esp.duration_minutes,
+                    esp.start_time,
+                    esp.end_time,
+                )
+        return snapshot
+
+    def _log_integrity_changes(self, before: dict, after: dict):
+        lines: list[str] = []
+
+        for entry_id, after_val in after["entries"].items():
+            before_val = before["entries"].get(entry_id)
+            if before_val and before_val[3:] != after_val[3:]:
+                route_name = after_val[1]
+                visit_name = after_val[2]
+                lines.append(
+                    f"{route_name} | Visit '{visit_name}': "
+                    f"{_display_time(before_val[3])}–{_display_time(before_val[4])} → "
+                    f"{_display_time(after_val[3])}–{_display_time(after_val[4])}"
+                )
+
+        for seg_id, after_val in after["segments"].items():
+            before_val = before["segments"].get(seg_id)
+            if before_val and before_val[5:] != after_val[5:]:
+                route_name = after_val[1]
+                lines.append(
+                    f"{route_name} | Travel {after_val[2]}→{after_val[3]}: "
+                    f"{before_val[5]} min ({_display_time(before_val[6])}–{_display_time(before_val[7])}) → "
+                    f"{after_val[5]} min ({_display_time(after_val[6])}–{_display_time(after_val[7])})"
+                )
+
+        for space_id, after_val in after["spaces"].items():
+            before_val = before["spaces"].get(space_id)
+            if before_val and before_val[4:] != after_val[4:]:
+                route_name = after_val[1]
+                lines.append(
+                    f"{route_name} | Gap {after_val[2]}→{after_val[3]}: "
+                    f"{before_val[4]} min ({_display_time(before_val[5])}–{_display_time(before_val[6])}) → "
+                    f"{after_val[4]} min ({_display_time(after_val[5])}–{_display_time(after_val[6])})"
+                )
+
+        if lines:
+            self._get_travel_status().log_integrity_change(
+                f"Time integrity made {len(lines)} changes"
+            )
+            for line in lines[:120]:
+                self._get_travel_status().log_integrity_change(line)
+            if len(lines) > 120:
+                self._get_travel_status().log_integrity_change(
+                    f"... and {len(lines) - 120} more"
+                )
+        else:
+            self._get_travel_status().log_integrity_ok("Time integrity: no changes needed")
 
     @Slot()
     def _on_block_visibility_changed(self):
@@ -1349,7 +1690,9 @@ class MainWindow(QMainWindow):
     def _on_open_settings(self):
         dlg = SettingsDialog(self._settings, self._api_key, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
+            previous_debug_mode = bool(self._settings.debug_mode)
             self._settings = dlg.get_settings()
+            self._apply_visit_color_palette()
             self._recalc.set_settings(self._settings)
             new_key = dlg.get_api_key()
             if new_key != self._api_key:
@@ -1364,6 +1707,27 @@ class MainWindow(QMainWindow):
                 self._mode_combo.setCurrentIndex(idx)
             self._extra_time_auto_action.setChecked(bool(self._settings.extra_time_auto_place))
             self._extra_time_spin.setValue(max(0, int(self._settings.extra_time_minutes)))
+            self._get_travel_status().configure_file_logging(
+                self._settings.file_logging_enabled,
+                self._settings.file_logging_retention_days,
+            )
+
+            if self._settings.debug_mode:
+                if not previous_debug_mode:
+                    self._get_travel_status().log_debug("Debug mode enabled")
+                self._run_debug_integrity_scan("Settings")
+            elif previous_debug_mode:
+                self._get_travel_status().log_debug("Debug mode disabled")
+                self._clear_debug_integrity_marks()
+
+    def _apply_visit_color_palette(self):
+        VisitItem.set_color_palette(self._settings.visit_ribbon_color_map())
+        for scene in (getattr(self, "_route_scene", None), getattr(self, "_pool_scene", None)):
+            if scene is None:
+                continue
+            for item in scene.items():
+                if isinstance(item, VisitItem):
+                    item.update()
 
     # ------------------------------------------------------------------
     # State export / import
@@ -1540,13 +1904,8 @@ class MainWindow(QMainWindow):
             small_font = QFont("Segoe UI", 8)
 
             color_map = {
-                VisitColor.GREEN: QColor(COLOR_VISIT_GREEN),
-                VisitColor.PINK: QColor(COLOR_VISIT_PINK),
-                VisitColor.BLUE: QColor(COLOR_VISIT_BLUE),
-                VisitColor.RED: QColor(COLOR_VISIT_RED),
-                VisitColor.ORANGE: QColor(COLOR_VISIT_ORANGE),
-                VisitColor.YELLOW: QColor(COLOR_VISIT_YELLOW),
-                VisitColor.BLACK: QColor(COLOR_VISIT_BLACK),
+                key: QColor(value)
+                for key, value in self._settings.visit_ribbon_color_map().items()
             }
 
             column_gap = 18
@@ -1705,7 +2064,7 @@ class MainWindow(QMainWindow):
                     entry = item
                     painter.fillRect(QRectF(x + content_pad, row_y, column_w - (content_pad * 2), visit_h), QColor(COLOR_VISIT_BG))
 
-                    strip_color = color_map.get(entry.display_color or "", QColor(COLOR_VISIT_BLACK))
+                    strip_color = color_map.get(entry.display_color or "", QColor("#2B2B2B"))
                     painter.fillRect(
                         QRectF(x + content_pad, row_y, left_strip_w, visit_h),
                         strip_color,
@@ -1869,6 +2228,10 @@ class MainWindow(QMainWindow):
     def _get_travel_status(self) -> TravelStatusDialog:
         if self._travel_status is None:
             self._travel_status = TravelStatusDialog(self)
+            self._travel_status.configure_file_logging(
+                self._settings.file_logging_enabled,
+                self._settings.file_logging_retention_days,
+            )
         return self._travel_status
 
     @Slot()
