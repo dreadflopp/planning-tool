@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://maps.googleapis.com/maps/api/js?key=API_KEY_PLACEHOLDER&v=3.61&loading=async&callback=initMap" async defer></script>
+    <style>
+        html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
+        .pin-label {
+            text-shadow: 0 0 2px #000, 0 0 3px #000, 1px 1px 2px rgba(0,0,0,0.8);
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <script>
+        let map;
+        const pins = {};
+        const pendingCalls = [];
+        const infoWindows = {};
+
+        window.addPin = function(id, lat, lon, name, color, infoContent, textColor, labelOffsetX, labelOffsetY) {
+            if (map) _addPin(id, lat, lon, name, color, infoContent, textColor, labelOffsetX, labelOffsetY);
+            else pendingCalls.push(['add', id, lat, lon, name, color, infoContent, textColor, labelOffsetX, labelOffsetY]);
+        };
+        window.clearPins = function() {
+            if (map) _clearPins();
+            else pendingCalls.push(['clear']);
+        };
+        window.panToPin = function(id, lat, lon) {
+            if (map) _panToPin(id, lat, lon);
+            else pendingCalls.push(['pan', id, lat, lon]);
+        };
+        window.zoomToPin = function(id, lat, lon) {
+            if (map) _zoomToPin(id, lat, lon);
+            else pendingCalls.push(['zoom', id, lat, lon]);
+        };
+
+        function initMap() {
+            map = new google.maps.Map(document.getElementById('map'), {
+                center: { lat: 57.71, lng: 11.97 },
+                zoom: 12,
+                mapTypeId: 'roadmap',
+                tilt: 0,
+                heading: 0,
+                disableDefaultUI: false,
+                zoomControl: true,
+                mapTypeControl: true,
+                scaleControl: true,
+                streetViewControl: true,
+                rotateControl: true,
+                fullscreenControl: true
+            });
+
+            function _addPin(id, lat, lon, name, color, infoContent, textColor, labelOffsetX, labelOffsetY) {
+                color = color || '#1F99CD';
+                infoContent = infoContent || name;
+                textColor = textColor || '#FFFFFF';
+                labelOffsetX = labelOffsetX || 0;
+                labelOffsetY = labelOffsetY || 0;
+                const shortName = String(name || '').slice(0, 22);
+                if (pins[id]) pins[id].setMap(null);
+                const pinSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="27" viewBox="0 0 28 42">' +
+                    '<path fill="' + color + '" stroke="#fff" stroke-width="2" d="M14 0C6.3 0 0 6.3 0 14c0 10.5 14 28 14 28s14-17.5 14-28C28 6.3 21.7 0 14 0z"/>' +
+                    '</svg>';
+                const icon = {
+                    url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(pinSvg),
+                    scaledSize: new google.maps.Size(22, 27),
+                    anchor: new google.maps.Point(11, 27)
+                };
+                const marker = new google.maps.Marker({
+                    position: { lat: lat, lng: lon },
+                    map: map,
+                    title: name,
+                    icon: icon,
+                    label: {
+                        text: shortName,
+                        color: textColor,
+                        fontSize: '12px',
+                        fontWeight: 'bold',
+                        fontFamily: 'Segoe UI, sans-serif',
+                        className: 'pin-label'
+                    },
+                    labelOrigin: new google.maps.Point(11 + (labelOffsetX || 0), 0 + (labelOffsetY || 0))
+                });
+                const infoWindow = new google.maps.InfoWindow({ content: infoContent });
+                marker.addListener('click', () => {
+                    _closeAllInfoWindows(id);
+                    infoWindow.open(map, marker);
+                });
+                pins[id] = marker;
+                infoWindows[id] = infoWindow;
+            }
+
+            function _closeAllInfoWindows(exceptId) {
+                Object.keys(infoWindows).forEach((k) => {
+                    if (String(k) === String(exceptId)) {
+                        return;
+                    }
+                    const iw = infoWindows[k];
+                    if (iw) {
+                        try { iw.close(); } catch (e) {}
+                    }
+                });
+            }
+
+            function _clearPins() {
+                Object.keys(pins).forEach((k) => {
+                    if (pins[k]) pins[k].setMap(null);
+                    delete pins[k];
+                    delete infoWindows[k];
+                });
+            }
+
+            function _panToPin(id, lat, lon) {
+                map.panTo({ lat: lat, lng: lon });
+                if (pins[id]) {
+                    pins[id].setAnimation(google.maps.Animation.BOUNCE);
+                    setTimeout(() => { if (pins[id]) pins[id].setAnimation(null); }, 1200);
+                }
+            }
+
+            function _zoomToPin(id, lat, lon) {
+                map.panTo({ lat: lat, lng: lon });
+                map.setZoom(16);
+                if (pins[id]) {
+                    pins[id].setAnimation(google.maps.Animation.BOUNCE);
+                    setTimeout(() => { if (pins[id]) pins[id].setAnimation(null); }, 1200);
+                }
+            }
+
+            window.addPin = function(id, lat, lon, name, color, infoContent, textColor, labelOffsetX, labelOffsetY) {
+                _addPin(id, lat, lon, name, color, infoContent, textColor, labelOffsetX, labelOffsetY);
+            };
+            window.clearPins = _clearPins;
+            window.panToPin = _panToPin;
+            window.zoomToPin = _zoomToPin;
+
+            pendingCalls.forEach(function(c) {
+                if (c[0] === 'add') _addPin(c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]);
+                else if (c[0] === 'clear') _clearPins();
+                else if (c[0] === 'pan') _panToPin(c[1], c[2], c[3]);
+                else if (c[0] === 'zoom') _zoomToPin(c[1], c[2], c[3]);
+            });
+            pendingCalls.length = 0;
+        }
+    </script>
+</body>
+</html>

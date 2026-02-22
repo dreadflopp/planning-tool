@@ -31,6 +31,7 @@ from domain.constants import (
 )
 from services.persistence_service import PersistenceService
 from services.excel_import_service import ExcelImportService
+from services.map_geocoding_service import MapGeocodingService
 from services.travel_time_service import TravelTimeService
 from services.auto_save_manager import AutoSaveManager
 from controllers.route_recalculation_engine import RouteRecalculationEngine, _t2m, _m2t, _display_time
@@ -43,6 +44,7 @@ from ui.flow_layout import FlowLayout
 from ui.dialogs.settings_dialog import SettingsDialog
 from ui.dialogs.travel_status_dialog import TravelStatusDialog
 from ui.items.visit_item import VisitItem
+from ui.visit_map_window import VisitMapWindow
 
 
 _SETTINGS_FILE = "settings.ini"
@@ -99,6 +101,8 @@ class MainWindow(QMainWindow):
         self._travel_status: Optional[TravelStatusDialog] = None
         self._travel_debounce_timers: dict[tuple[int, int, int], QTimer] = {}
         self._failed_fallback_keys: set[tuple[str, str, str]] = set()
+        self._map_window: Optional[VisitMapWindow] = None
+        self._selected_visit_id: Optional[int] = None
 
         # Paired visit index: visit_id → partner_visit_id
         self._pairs: dict[int, int] = {}
@@ -153,6 +157,7 @@ class MainWindow(QMainWindow):
             "_on_import_state",
             "_on_export_excel",
             "_on_export_pdf",
+            "_on_open_map",
         }
 
         for name in action_methods:
@@ -524,6 +529,10 @@ class MainWindow(QMainWindow):
         act_settings.triggered.connect(self._on_open_settings)
         tb.addAction(act_settings)
 
+        act_map = QAction("Karta", self)
+        act_map.triggered.connect(self._on_open_map)
+        tb.addAction(act_map)
+
         tb.addSeparator()
 
         act_reset_all = QAction("Rensa allt", self)
@@ -562,6 +571,8 @@ class MainWindow(QMainWindow):
         visits = self._db.load_all_visits()
         self._visits = {v.id: v for v in visits}
 
+        self._precache_map_addresses(visits)
+
         routes = self._db.load_all_routes(self._visits)
         self._routes = {r.id: r for r in routes}
 
@@ -589,6 +600,49 @@ class MainWindow(QMainWindow):
         self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._on_block_visibility_changed()
+        self._sync_map_window_visits()
+        self._sync_map_selection()
+
+    def _precache_map_addresses(self, visits: list[Visit]):
+        if not self._api_key:
+            return
+        addresses: list[str] = []
+        office_address = self._default_templates[0].get("address", "") if self._default_templates else ""
+        if office_address:
+            addresses.append(office_address)
+        for visit in visits:
+            address = (visit.full_address or visit.address or "").strip()
+            if address:
+                addresses.append(address)
+        if not addresses:
+            return
+        geocode_svc = MapGeocodingService(self._db, self._api_key)
+        geocode_svc.precache_addresses(addresses)
+
+    @Slot()
+    def _on_open_map(self):
+        if self._map_window is None:
+            office_address = self._default_templates[0].get("address", "") if self._default_templates else ""
+            self._map_window = VisitMapWindow(self._db, self._api_key, office_address, self)
+            self._map_window.set_color_palette(self._settings.visit_ribbon_color_map())
+            self._map_window.destroyed.connect(lambda *_: setattr(self, "_map_window", None))
+            self._sync_map_window_visits()
+            self._sync_map_selection()
+        self._map_window.show()
+        self._map_window.raise_()
+
+    def _sync_map_window_visits(self):
+        if self._map_window is None:
+            return
+        office_address = self._default_templates[0].get("address", "") if self._default_templates else ""
+        self._map_window.set_office_address(office_address)
+        self._map_window.set_color_palette(self._settings.visit_ribbon_color_map())
+        self._map_window.set_visits(list(self._visits.values()))
+
+    def _sync_map_selection(self):
+        if self._map_window is None:
+            return
+        self._map_window.set_selected_visit_id(self._selected_visit_id)
 
     def _compute_pairs(self):
         """Find DUBBELBEMANNING 1 / DUBBELBEMANNING 2 pairs."""
@@ -915,6 +969,7 @@ class MainWindow(QMainWindow):
             entry.visit.color = color
             self._db.upsert_visit(entry.visit)
         self._route_scene.rebuild_route(route)
+        self._sync_map_window_visits()
 
     @Slot(int, int)
     def _on_entry_remove_requested(self, route_id: int, entry_id: int):
@@ -1699,6 +1754,9 @@ class MainWindow(QMainWindow):
                 self._api_key = new_key
                 _save_api_key(new_key)
                 self._travel_svc.set_api_key(new_key)
+                if self._map_window is not None:
+                    self._map_window.close()
+                    self._map_window = None
             self._db.save_settings(self._settings)
             # Sync toolbar widgets
             self._on_font_size_changed(self._settings.font_size)
@@ -2252,14 +2310,20 @@ class MainWindow(QMainWindow):
         if route:
             entry = next((e for e in route.entries if e.id == entry_id), None)
             if entry and entry.visit_id:
+                self._selected_visit_id = entry.visit_id
+                self._sync_map_selection()
                 self._highlight_pair_for_visit(entry.visit_id)
                 return
+        self._selected_visit_id = None
+        self._sync_map_selection()
         self._highlight_pair_for_visit(None)
 
     @Slot(int)
     def _on_pool_visit_selected(self, visit_id: int):
         self._pool_scene.set_selected_visit(visit_id)
         self._route_scene.set_selected_entry(None, None)
+        self._selected_visit_id = visit_id
+        self._sync_map_selection()
         self._highlight_pair_for_visit(visit_id)
 
     def _highlight_pair_for_visit(self, visit_id: Optional[int]):
@@ -2278,6 +2342,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
+        if self._map_window is not None:
+            self._map_window.close()
         self._autosave.flush_now()
         self._db.save_settings(self._settings)
         self._db.close()
