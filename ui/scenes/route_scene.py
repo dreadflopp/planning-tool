@@ -34,7 +34,11 @@ class RouteScene(QGraphicsScene):
     entry_moved = Signal(int, int, int)            # (route_id, entry_id, direction)
     entry_time_edit = Signal(int, int)             # (route_id, entry_id)
     entry_duration_changed = Signal(int, int, int) # (route_id, entry_id, delta_minutes)
+    entry_color_changed = Signal(int, int, object) # (route_id, entry_id, color|None)
+    entry_remove_requested = Signal(int, int)      # (route_id, entry_id)
+    empty_remove = Signal(int, int, int)           # (route_id, from_entry_id, to_entry_id)
     travel_mode_changed = Signal(int, int, str)    # (route_id, seg_id, mode)
+    travel_duration_changed = Signal(int, int, int) # (route_id, seg_id, delta)
     travel_minutes_edit = Signal(int, int)         # (route_id, seg_id)
     travel_restore = Signal(int, int)              # (route_id, seg_id)
     visit_selected = Signal(int, int)              # (route_id, entry_id)
@@ -80,9 +84,14 @@ class RouteScene(QGraphicsScene):
             col.set_font_size(size)
         self._reposition_columns()
 
-    def apply_filter(self, active_tags: set[str]):
+    def set_block_visibility(self, show_travel: bool, show_space: bool):
         for col in self._column_items:
-            col.apply_filter(active_tags)
+            col.set_block_visibility(show_travel, show_space)
+        self._reposition_columns()
+
+    def apply_filter(self, active_tags: set[str], mode: str = "or"):
+        for col in self._column_items:
+            col.apply_filter(active_tags, mode)
 
     def highlight_pair(self, route_id: Optional[int], entry_id: Optional[int]):
         for col in self._column_items:
@@ -126,7 +135,9 @@ class RouteScene(QGraphicsScene):
     def dragMoveEvent(self, event):
         event.acceptProposedAction()
         mime = event.mimeData()
-        if mime.hasFormat(MIME_POOL_VISIT) or mime.hasFormat(MIME_OFFICE_TEMPLATE):
+        if (mime.hasFormat(MIME_POOL_VISIT) or
+            mime.hasFormat(MIME_OFFICE_TEMPLATE) or
+            mime.hasFormat(MIME_ROUTE_ENTRY)):
             pos = event.scenePos()
             col = self._column_at(pos)
             if col:
@@ -150,27 +161,33 @@ class RouteScene(QGraphicsScene):
 
         if mime.hasFormat(MIME_POOL_VISIT):
             data = json.loads(bytes(mime.data(MIME_POOL_VISIT)).decode())
+            insert_index = col.insert_index_for_scene_y(pos.y())
             self.entry_dropped.emit(col.route.id, {
                 "type": "pool_visit",
                 "visit_id": data["visit_id"],
+                "insert_index": insert_index,
             })
             event.acceptProposedAction()
 
         elif mime.hasFormat(MIME_OFFICE_TEMPLATE):
             data = json.loads(bytes(mime.data(MIME_OFFICE_TEMPLATE)).decode())
+            insert_index = col.insert_index_for_scene_y(pos.y())
             self.entry_dropped.emit(col.route.id, {
                 "type": "office",
                 "name": data["name"],
                 "address": data["address"],
+                "insert_index": insert_index,
             })
             event.acceptProposedAction()
 
         elif mime.hasFormat(MIME_ROUTE_ENTRY):
             data = json.loads(bytes(mime.data(MIME_ROUTE_ENTRY)).decode())
+            insert_index = col.insert_index_for_scene_y(pos.y())
             self.entry_dropped.emit(col.route.id, {
                 "type": "route_entry",
                 "entry_id": data["entry_id"],
                 "source_route_id": data["route_id"],
+                "insert_index": insert_index,
             })
             event.acceptProposedAction()
 
@@ -206,11 +223,25 @@ class RouteScene(QGraphicsScene):
         col.entry_time_edit.connect(
             lambda c, v: self.entry_time_edit.emit(c.route.id, v.entry.id))
         col.entry_duration_up.connect(
-            lambda c, v: self.entry_duration_changed.emit(c.route.id, v.entry.id, +5))
+            lambda c, v: self.entry_duration_changed.emit(c.route.id, v.entry.id, +1))
         col.entry_duration_dn.connect(
-            lambda c, v: self.entry_duration_changed.emit(c.route.id, v.entry.id, -5))
+            lambda c, v: self.entry_duration_changed.emit(c.route.id, v.entry.id, -1))
+        col.entry_color_change.connect(
+            lambda c, v, color: self.entry_color_changed.emit(c.route.id, v.entry.id, color))
+        col.entry_remove.connect(
+            lambda c, v: self.entry_remove_requested.emit(c.route.id, v.entry.id))
+        col.empty_remove.connect(
+            lambda c, e: self.empty_remove.emit(
+                c.route.id,
+                e.space.from_entry_id,
+                e.space.to_entry_id,
+            ))
         col.travel_mode_changed.connect(
             lambda c, t: self.travel_mode_changed.emit(c.route.id, t.segment.id, t.segment.mode))
+        col.travel_duration_up.connect(
+            lambda c, t: self.travel_duration_changed.emit(c.route.id, t.segment.id, +1))
+        col.travel_duration_dn.connect(
+            lambda c, t: self.travel_duration_changed.emit(c.route.id, t.segment.id, -1))
         col.travel_edit_minutes.connect(
             lambda c, t: self.travel_minutes_edit.emit(c.route.id, t.segment.id))
         col.travel_restore.connect(
@@ -224,7 +255,8 @@ class RouteScene(QGraphicsScene):
         if ok and text.strip():
             col.route.name = text.strip()
             self.route_renamed.emit(col.route.id, text.strip())
-            col.update()
+            col.refresh_header()
+            self._reposition_columns()
 
     def _on_notes(self, col: RouteColumnItem):
         text, ok = QInputDialog.getMultiLineText(
@@ -234,7 +266,8 @@ class RouteScene(QGraphicsScene):
         if ok:
             col.route.notes = text
             self.route_notes_changed.emit(col.route.id, text)
-            col.update()
+            col.refresh_header()
+            self._reposition_columns()
 
     def _reposition_columns(self, animate: bool = False):
         items = sorted(self._column_items, key=lambda c: c.route.display_order)

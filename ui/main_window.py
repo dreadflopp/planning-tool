@@ -11,21 +11,21 @@ from PySide6.QtCore import Qt, Slot, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QToolBar, QLabel, QSpinBox, QComboBox, QCheckBox, QPushButton,
+    QToolBar, QLabel, QSpinBox, QComboBox, QPushButton,
     QScrollArea, QFileDialog, QMessageBox, QInputDialog, QDialog,
-    QGroupBox, QScrollBar, QSizePolicy,
+    QGroupBox, QScrollBar, QSizePolicy, QFormLayout, QDialogButtonBox, QLineEdit,
 )
 
 from domain.models import (
     Route, RouteEntry, TravelSegment, EmptySpace, Visit,
-    Settings, OfficeTemplate, TravelMode,
+    Settings, TravelMode,
 )
 from domain.constants import VISIT_WIDTH, COLUMN_SPACING
 from services.persistence_service import PersistenceService
 from services.excel_import_service import ExcelImportService
 from services.travel_time_service import TravelTimeService
 from services.auto_save_manager import AutoSaveManager
-from controllers.route_recalculation_engine import RouteRecalculationEngine, _t2m, _m2t
+from controllers.route_recalculation_engine import RouteRecalculationEngine, _t2m, _m2t, _display_time
 from controllers.route_layout_engine import RouteLayoutEngine
 from ui.scenes.route_scene import RouteScene
 from ui.scenes.pool_scene import PoolScene
@@ -64,7 +64,13 @@ class MainWindow(QMainWindow):
         self._db = persistence
         self._settings: Settings = self._db.load_settings()
         self._api_key: str = _load_api_key()
-        self._office_template: OfficeTemplate = self._db.load_office_template()
+        self._default_template_address = "Angereds Torg 5, 424 65 Angered"
+        self._default_templates = [
+            {"name": "Kontor", "address": self._default_template_address, "duration_minutes": 10},
+            {"name": "Uppstart", "address": self._default_template_address, "duration_minutes": 30},
+            {"name": "Rast", "address": self._default_template_address, "duration_minutes": 40},
+            {"name": "Avslut", "address": self._default_template_address, "duration_minutes": 20},
+        ]
 
         # In-memory collections
         self._visits: dict[int, Visit] = {}
@@ -115,6 +121,12 @@ class MainWindow(QMainWindow):
         filter_label_row = QHBoxLayout()
         self._filter_label = QLabel("Filter (Insatser):")
         filter_label_row.addWidget(self._filter_label)
+        self._filter_mode_combo = QComboBox()
+        self._filter_mode_combo.addItem("OR", "or")
+        self._filter_mode_combo.addItem("AND", "and")
+        self._filter_mode_combo.currentIndexChanged.connect(self._on_filter_changed)
+        filter_label_row.addWidget(QLabel("Kombination:"))
+        filter_label_row.addWidget(self._filter_mode_combo)
         filter_label_row.addStretch()
         filter_bar_vbox.addLayout(filter_label_row)
 
@@ -126,7 +138,7 @@ class MainWindow(QMainWindow):
         self._filter_layout.setContentsMargins(0, 0, 0, 0)
         filter_bar_vbox.addWidget(self._filter_cb_container)
 
-        self._filter_checkboxes: dict[str, QCheckBox] = {}
+        self._filter_buttons: dict[str, QPushButton] = {}
         root_layout.addWidget(self._filter_bar, 0)
 
         # Main splitter
@@ -196,6 +208,20 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
+        self._show_travel_action = QAction("Restid", self)
+        self._show_travel_action.setCheckable(True)
+        self._show_travel_action.setChecked(True)
+        self._show_travel_action.toggled.connect(self._on_block_visibility_changed)
+        tb.addAction(self._show_travel_action)
+
+        self._show_space_action = QAction("Lucka", self)
+        self._show_space_action.setCheckable(True)
+        self._show_space_action.setChecked(True)
+        self._show_space_action.toggled.connect(self._on_block_visibility_changed)
+        tb.addAction(self._show_space_action)
+
+        tb.addSeparator()
+
         # Default travel mode
         tb.addWidget(QLabel(" Färdsätt: "))
         self._mode_combo = QComboBox()
@@ -209,24 +235,13 @@ class MainWindow(QMainWindow):
         self._mode_combo.currentIndexChanged.connect(self._on_default_mode_changed)
         tb.addWidget(self._mode_combo)
 
-        tb.addSeparator()
+        act_integrity = QAction("Tidsintegritet", self)
+        act_integrity.triggered.connect(self._on_time_integrity)
+        tb.addAction(act_integrity)
 
-        # Minimum time controls
-        tb.addWidget(QLabel(" Min. tid: "))
-        self._min_time_spin = QSpinBox()
-        self._min_time_spin.setRange(0, 60)
-        self._min_time_spin.setValue(self._settings.minimum_time_between_visits)
-        self._min_time_spin.setSuffix(" min")
-        self._min_time_spin.valueChanged.connect(self._on_min_time_changed)
-        tb.addWidget(self._min_time_spin)
-
-        act_apply_min = QAction("Applicera mintid", self)
-        act_apply_min.triggered.connect(self._on_apply_min_time)
-        tb.addAction(act_apply_min)
-
-        act_strip = QAction("Rensa luckor", self)
-        act_strip.triggered.connect(self._on_strip_empty_space)
-        tb.addAction(act_strip)
+        act_reset_all = QAction("Rensa allt", self)
+        act_reset_all.triggered.connect(self._on_reset_all)
+        tb.addAction(act_reset_all)
 
         tb.addSeparator()
 
@@ -243,13 +258,16 @@ class MainWindow(QMainWindow):
         s.entry_moved.connect(self._on_entry_moved)
         s.entry_time_edit.connect(self._on_entry_time_edit)
         s.entry_duration_changed.connect(self._on_entry_duration_changed)
+        s.entry_color_changed.connect(self._on_entry_color_changed)
+        s.entry_remove_requested.connect(self._on_entry_remove_requested)
+        s.empty_remove.connect(self._on_empty_remove)
         s.travel_mode_changed.connect(self._on_travel_mode_changed)
+        s.travel_duration_changed.connect(self._on_travel_duration_changed)
         s.travel_minutes_edit.connect(self._on_travel_minutes_edit)
         s.travel_restore.connect(self._on_travel_restore)
         s.visit_selected.connect(self._on_route_visit_selected)
 
     def _wire_pool_scene(self):
-        self._pool_scene.office_edit_requested.connect(self._on_office_edit)
         self._pool_scene.entry_returned_to_pool.connect(self._on_entry_returned)
         self._pool_scene.visit_selected.connect(self._on_pool_visit_selected)
 
@@ -271,16 +289,16 @@ class MainWindow(QMainWindow):
         placed = self._db.get_placed_visit_ids()
         pool_visits = [v for v in visits if v.id not in placed]
 
-        self._pool_scene.load(self._office_template, pool_visits)
+        self._pool_scene.load(self._default_templates, pool_visits)
         self._route_scene.load_routes(routes)
 
     def _compute_pairs(self):
-        """Find DUBBELGÅNG 1 / DUBBELGÅNG 2 pairs."""
+        """Find DUBBELBEMANNING 1 / DUBBELBEMANNING 2 pairs."""
         self._pairs.clear()
         cands: dict[str, list[Visit]] = {}
         for v in self._visits.values():
             ins = v.insatser.upper()
-            if "DUBBELGÅNG 1" in ins or "DUBBELGÅNG 2" in ins:
+            if "DUBBELBEMANNING 1" in ins or "DUBBELBEMANNING 2" in ins:
                 key = f"{v.name.strip().lower()}|{v.address.strip().lower()}"
                 cands.setdefault(key, []).append(v)
 
@@ -290,18 +308,25 @@ class MainWindow(QMainWindow):
             for i in range(len(group)):
                 for j in range(i + 1, len(group)):
                     a, b = group[i], group[j]
-                    if abs(_t2m(a.default_start) - _t2m(b.default_start)) <= 20:
+                    a_ins = (a.insatser or "").upper()
+                    b_ins = (b.insatser or "").upper()
+                    a_is_1 = "DUBBELBEMANNING 1" in a_ins
+                    a_is_2 = "DUBBELBEMANNING 2" in a_ins
+                    b_is_1 = "DUBBELBEMANNING 1" in b_ins
+                    b_is_2 = "DUBBELBEMANNING 2" in b_ins
+                    valid_roles = (a_is_1 and b_is_2) or (a_is_2 and b_is_1)
+                    if valid_roles and abs(_t2m(a.default_start) - _t2m(b.default_start)) <= 5:
                         self._pairs[a.id] = b.id
                         self._pairs[b.id] = a.id
 
     def _build_filter_bar(self):
-        # Clear existing checkboxes (hide first to avoid flash)
-        for cb in self._filter_checkboxes.values():
-            cb.hide()
-            cb.deleteLater()
+        # Clear existing buttons (hide first to avoid flash)
+        for btn in self._filter_buttons.values():
+            btn.hide()
+            btn.deleteLater()
         # Purge dead layout items
         self._filter_layout._items.clear()
-        self._filter_checkboxes.clear()
+        self._filter_buttons.clear()
 
         # Collect unique Insatser tokens
         tags: set[str] = set()
@@ -312,11 +337,12 @@ class MainWindow(QMainWindow):
                     tags.add(t)
 
         for tag in sorted(tags):
-            cb = QCheckBox(tag, self._filter_cb_container)
-            cb.setChecked(True)
-            cb.toggled.connect(self._on_filter_changed)
-            self._filter_checkboxes[tag] = cb
-            self._filter_layout.addWidget(cb)
+            btn = QPushButton(tag, self._filter_cb_container)
+            btn.setCheckable(True)
+            btn.setChecked(False)
+            btn.toggled.connect(self._on_filter_changed)
+            self._filter_buttons[tag] = btn
+            self._filter_layout.addWidget(btn)
 
         self._filter_layout.invalidate()
         self._filter_cb_container.updateGeometry()
@@ -327,11 +353,10 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_filter_changed(self):
-        active = {tag for tag, cb in self._filter_checkboxes.items() if cb.isChecked()}
-        if len(active) == len(self._filter_checkboxes):
-            active = set()  # all checked → no filter
-        self._route_scene.apply_filter(active)
-        self._pool_scene.apply_filter(active)
+        active = {tag for tag, btn in self._filter_buttons.items() if btn.isChecked()}
+        mode = self._filter_mode_combo.currentData() or "or"
+        self._route_scene.apply_filter(active, mode)
+        self._pool_scene.apply_filter(active, mode)
 
     # ------------------------------------------------------------------
     # Route management
@@ -339,13 +364,20 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_add_route(self):
-        name, ok = QInputDialog.getText(self, "Ny rutt", "Ruttnamn:")
-        if not ok or not name.strip():
-            return
+        name = self._next_default_route_name()
         order = max((r.display_order for r in self._routes.values()), default=-1) + 1
-        route = self._db.create_route(name.strip(), order)
+        route = self._db.create_route(name, order)
         self._routes[route.id] = route
         self._route_scene.add_route(route)
+
+    def _next_default_route_name(self) -> str:
+        used = {r.name for r in self._routes.values()}
+        n = 1
+        while True:
+            candidate = f"Rutt {n}"
+            if candidate not in used:
+                return candidate
+            n += 1
 
     @Slot(int, str)
     def _on_route_renamed(self, route_id: int, name: str):
@@ -395,36 +427,45 @@ class MainWindow(QMainWindow):
             return
 
         dtype = data.get("type")
+        insert_index = data.get("insert_index")
 
         if dtype == "pool_visit":
             visit_id = data["visit_id"]
             visit = self._visits.get(visit_id)
             if not visit:
                 return
+            dur = max(1, _t2m(visit.default_end) - _t2m(visit.default_start))
             entry = RouteEntry(
                 id=None, route_id=route_id, visit_id=visit_id,
                 position=0,
-                start_time=visit.default_start,
-                end_time=visit.default_end,
+                start_time="07:00",
+                end_time=_m2t(_t2m("07:00") + dur),
                 visit=visit,
             )
-            self._recalc.add_entry_to_route(route, entry,
-                                             self._settings.default_travel_mode)
+            self._recalc.add_entry_to_route(
+                route, entry,
+                self._settings.default_travel_mode,
+                insert_index=insert_index,
+            )
             self._pool_scene.remove_visit(visit_id)
             self._request_travel_for_new_entry(route, entry)
             self._route_scene.rebuild_route(route)
 
         elif dtype == "office":
+            duration = max(1, int(data.get("duration_minutes", 10)))
             entry = RouteEntry(
                 id=None, route_id=route_id, visit_id=None,
                 position=0,
-                start_time="08:00", end_time="08:30",
+                start_time="07:00", end_time=_m2t(_t2m("07:00") + duration),
                 is_office_instance=True,
                 office_name=data.get("name", "Kontor"),
                 office_address=data.get("address", ""),
             )
-            self._recalc.add_entry_to_route(route, entry,
-                                             self._settings.default_travel_mode)
+            self._recalc.add_entry_to_route(
+                route, entry,
+                self._settings.default_travel_mode,
+                insert_index=insert_index,
+            )
             self._route_scene.rebuild_route(route)
 
         elif dtype == "route_entry":
@@ -432,7 +473,30 @@ class MainWindow(QMainWindow):
             entry_id = data["entry_id"]
             src_route_id = data["source_route_id"]
             if src_route_id == route_id:
-                return  # same route: handled by up/down
+                entries = route.sorted_entries()
+                current_idx = next((i for i, e in enumerate(entries) if e.id == entry_id), None)
+                if current_idx is None or insert_index is None:
+                    return
+                # insert_index is computed in the pre-removal coordinate space [0..len(entries)]
+                insert_index = max(0, min(insert_index, len(entries)))
+
+                # When moving forward, removing the source shifts later indices left by one.
+                adjusted_index = insert_index - 1 if insert_index > current_idx else insert_index
+                adjusted_index = max(0, min(adjusted_index, len(entries) - 1))
+
+                if adjusted_index == current_idx:
+                    return
+                entry = entries.pop(current_idx)
+                # After pop, list length is len(entries)-1; insert accepts index up to new len.
+                adjusted_index = max(0, min(adjusted_index, len(entries)))
+                entries.insert(adjusted_index, entry)
+                for i, e in enumerate(entries):
+                    e.position = i
+                route.entries = entries
+                self._recalc.recalculate(route)
+                self._route_scene.rebuild_route(route)
+                self._autosave.mark_dirty(route.id)
+                return
             src_route = self._routes.get(src_route_id)
             if not src_route:
                 return
@@ -444,8 +508,11 @@ class MainWindow(QMainWindow):
             # Reset position and add to target
             entry.route_id = route_id
             entry.id = None
-            self._recalc.add_entry_to_route(route, entry,
-                                             self._settings.default_travel_mode)
+            self._recalc.add_entry_to_route(
+                route, entry,
+                self._settings.default_travel_mode,
+                insert_index=insert_index,
+            )
             self._route_scene.rebuild_route(src_route)
             self._route_scene.rebuild_route(route)
 
@@ -458,21 +525,57 @@ class MainWindow(QMainWindow):
             entry = next((e for e in route.entries if e.id == entry_id), None)
             if entry:
                 if entry.visit_id and entry.visit_id in self._visits:
-                    v = self._visits[entry.visit_id]
-                    # Restore default times
-                    v_restored = Visit(
-                        id=v.id, object_id=v.object_id, name=v.name,
-                        address=v.address, street=v.street,
-                        default_start=v.default_start, default_end=v.default_end,
-                        insatser=v.insatser, color=v.color, raw_data=v.raw_data,
-                        full_address=v.full_address,
-                    )
-                    self._recalc.remove_entry_from_route(route, entry,
-                                                          replace_with_empty=True)
-                    self._pool_scene.add_visit(v_restored)
-                    self._route_scene.rebuild_route(route)
-                    self._autosave.mark_dirty(route.id)
+                    self._remove_entry_to_pool(route, entry)
                 return
+
+    def _remove_entry_to_pool(self, route: Route, entry: RouteEntry):
+        if not entry.visit_id or entry.visit_id not in self._visits:
+            return
+        v = self._visits[entry.visit_id]
+        v_restored = Visit(
+            id=v.id, object_id=v.object_id, name=v.name,
+            address=v.address, street=v.street,
+            default_start=v.default_start, default_end=v.default_end,
+            insatser=v.insatser, color=v.color, raw_data=v.raw_data,
+            full_address=v.full_address,
+        )
+        self._recalc.remove_entry_from_route(route, entry, replace_with_empty=True)
+        self._pool_scene.add_visit(v_restored)
+        self._route_scene.rebuild_route(route)
+        self._autosave.mark_dirty(route.id)
+
+    @Slot(int, int, object)
+    def _on_entry_color_changed(self, route_id: int, entry_id: int, color):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        entry = next((e for e in route.entries if e.id == entry_id), None)
+        if not entry:
+            return
+        if entry.is_office_instance:
+            entry.office_color = color or "black"
+            self._db.update_route_entry(entry)
+        else:
+            if not entry.visit:
+                return
+            entry.visit.color = color
+            self._db.upsert_visit(entry.visit)
+        self._route_scene.rebuild_route(route)
+
+    @Slot(int, int)
+    def _on_entry_remove_requested(self, route_id: int, entry_id: int):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        entry = next((e for e in route.entries if e.id == entry_id), None)
+        if not entry:
+            return
+        if entry.visit_id and entry.visit_id in self._visits:
+            self._remove_entry_to_pool(route, entry)
+        elif entry.is_office_instance:
+            self._recalc.remove_entry_from_route(route, entry, replace_with_empty=False)
+            self._route_scene.rebuild_route(route)
+            self._autosave.mark_dirty(route.id)
 
     # ------------------------------------------------------------------
     # Entry reordering
@@ -510,7 +613,7 @@ class MainWindow(QMainWindow):
         entries = route.sorted_entries()
         entry_idx = next((i for i, e in enumerate(entries) if e.id == entry_id), 0)
 
-        # Calculate minimum allowed start
+        # Calculate minimum allowed start (must keep one-minute integrity)
         min_start = 0
         if entry_idx > 0:
             prev = entries[entry_idx - 1]
@@ -518,34 +621,92 @@ class MainWindow(QMainWindow):
             travel = seg.travel_minutes if seg else 0
             min_start = _t2m(prev.end_time) + travel
 
-        text, ok = QInputDialog.getText(
-            self, "Redigera tid",
-            f"Starttid för {entry.display_name}\n"
-            f"(format HH:MM, tidigast {_m2t(min_start)}):",
-            text=entry.start_time,
-        )
-        if not ok or not text.strip():
+        current_start_abs = _t2m(entry.start_time)
+        current_duration = max(1, _t2m(entry.end_time) - _t2m(entry.start_time))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Redigera besök")
+        form = QFormLayout(dlg)
+
+        start_edit = QLineEdit(_display_time(entry.start_time), dlg)
+        start_edit.setPlaceholderText("HH:MM")
+        duration_spin = QSpinBox(dlg)
+        duration_spin.setRange(1, 720)
+        duration_spin.setValue(current_duration)
+        duration_spin.setSuffix(" min")
+
+        form.addRow("Starttid (HH:MM):", start_edit)
+        form.addRow("Duration:", duration_spin)
+        if entry_idx > 0:
+            form.addRow("Tidigast:", QLabel(_display_time(_m2t(min_start)), dlg))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dlg)
+        form.addRow(buttons)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
         import re
-        m = re.match(r"(\d{1,2}):(\d{2})", text.strip())
+        text = start_edit.text().strip()
+        m = re.match(r"^(\d{1,2}):(\d{2})$", text)
         if not m:
             QMessageBox.warning(self, "Fel format", "Ange tid som HH:MM")
             return
 
-        new_start = int(m.group(1)) * 60 + int(m.group(2))
-        if new_start <= min_start and entry_idx > 0:
+        h = int(m.group(1))
+        mm = int(m.group(2))
+        if h < 0 or h > 23 or mm < 0 or mm > 59:
+            QMessageBox.warning(self, "Fel format", "Ange giltig tid (00:00–23:59)")
+            return
+
+        target_day = current_start_abs // 1440
+        new_start = target_day * 1440 + h * 60 + mm
+        if current_start_abs - new_start > 720:
+            new_start += 1440
+        elif new_start - current_start_abs > 720:
+            new_start -= 1440
+
+        if new_start < min_start:
             QMessageBox.warning(
                 self, "Ogiltig tid",
-                f"Starttiden måste vara efter {_m2t(min_start)}."
+                f"Starttiden kräver tillräcklig lucka före besöket. Tidigast {_display_time(_m2t(min_start))}."
             )
             return
 
-        duration = _t2m(entry.end_time) - _t2m(entry.start_time)
+        duration = duration_spin.value()
+        old_start = _t2m(entry.start_time)
+        old_end = _t2m(entry.end_time)
         entry.start_time = _m2t(new_start)
         entry.end_time = _m2t(new_start + duration)
 
-        self._recalc.recalculate_after_entry_time_change(route, entry)
+        if entry_idx > 0:
+            prev = entries[entry_idx - 1]
+            seg = route.travel_segment_between(prev.id, entry.id)
+            travel = seg.travel_minutes if seg else 0
+            base_start = _t2m(prev.end_time) + travel
+            manual_gap = max(0, new_start - base_start)
+            space = route.empty_space_between(prev.id, entry.id)
+            if manual_gap > 0:
+                if space is None:
+                    route.empty_spaces.append(EmptySpace(
+                        id=None,
+                        route_id=route.id,
+                        from_entry_id=prev.id,
+                        to_entry_id=entry.id,
+                        duration_minutes=manual_gap,
+                    ))
+                else:
+                    space.duration_minutes = manual_gap
+            elif space is not None:
+                route.empty_spaces.remove(space)
+
+        new_end = _t2m(entry.end_time)
+        self._recalc.shift_following_entries(route, entry.id, new_end - old_end,
+                                             include_anchor=True)
+
+        self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route_id)
 
@@ -559,8 +720,43 @@ class MainWindow(QMainWindow):
             return
         current = _t2m(entry.end_time) - _t2m(entry.start_time)
         new_dur = max(1, current + delta)
+        effective_delta = new_dur - current
+
+        shift_delta = effective_delta
+        if effective_delta > 0:
+            entries = route.sorted_entries()
+            idx = next((i for i, e in enumerate(entries) if e.id == entry.id), None)
+            if idx is not None and idx < len(entries) - 1:
+                nxt = entries[idx + 1]
+                space = route.empty_space_between(entry.id, nxt.id)
+                if space and space.duration_minutes > 0:
+                    consume = min(effective_delta, space.duration_minutes)
+                    space.duration_minutes -= consume
+                    if space.duration_minutes <= 0:
+                        route.empty_spaces.remove(space)
+                    shift_delta = effective_delta - consume
+
         entry.end_time = _m2t(_t2m(entry.start_time) + new_dur)
-        self._recalc.recalculate_after_entry_time_change(route, entry)
+        self._recalc.shift_following_entries(route, entry.id, shift_delta)
+        self._recalc.recalculate(route)
+        self._route_scene.rebuild_route(route)
+        self._autosave.mark_dirty(route_id)
+
+    @Slot(int, int, int)
+    def _on_empty_remove(self, route_id: int, from_entry_id: int, to_entry_id: int):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        space = route.empty_space_between(from_entry_id, to_entry_id)
+        if not space:
+            return
+        removed = max(0, space.duration_minutes)
+        route.empty_spaces.remove(space)
+        to_entry = next((e for e in route.entries if e.id == to_entry_id), None)
+        if to_entry and removed > 0:
+            self._recalc.shift_following_entries(route, to_entry.id, -removed,
+                                                 include_anchor=True)
+        self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route_id)
 
@@ -589,6 +785,41 @@ class MainWindow(QMainWindow):
                 from_entry.display_address, to_entry.display_address, mode
             )
 
+    @Slot(int, int, int)
+    def _on_travel_duration_changed(self, route_id: int, seg_id: int, delta: int):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        seg = next((s for s in route.travel_segments if s.id == seg_id), None)
+        if not seg:
+            return
+        old_minutes = max(0, seg.travel_minutes)
+        new_minutes = max(0, old_minutes + delta)
+        change = new_minutes - old_minutes
+
+        seg.travel_minutes = new_minutes
+        seg.is_custom = True
+
+        shift_delta = change
+        if change > 0:
+            space = route.empty_space_between(seg.from_entry_id, seg.to_entry_id)
+            if space and space.duration_minutes > 0:
+                consume = min(change, space.duration_minutes)
+                space.duration_minutes -= consume
+                if space.duration_minutes <= 0:
+                    route.empty_spaces.remove(space)
+                shift_delta = change - consume
+
+        if shift_delta != 0:
+            to_entry = next((e for e in route.entries if e.id == seg.to_entry_id), None)
+            if to_entry:
+                self._recalc.shift_following_entries(route, to_entry.id, shift_delta,
+                                                     include_anchor=True)
+
+        self._recalc.recalculate(route)
+        self._route_scene.rebuild_route(route)
+        self._autosave.mark_dirty(route_id)
+
     @Slot(int, int)
     def _on_travel_minutes_edit(self, route_id: int, seg_id: int):
         route = self._routes.get(route_id)
@@ -600,10 +831,33 @@ class MainWindow(QMainWindow):
         val, ok = QInputDialog.getInt(
             self, "Redigera resetid",
             "Resetid (minuter):",
-            value=seg.travel_minutes, min=0, max=300,
+            value=seg.travel_minutes, minValue=0, maxValue=300,
         )
         if ok:
-            self._recalc.set_custom_travel_minutes(route, seg, val)
+            old_minutes = max(0, seg.travel_minutes)
+            new_minutes = max(0, val)
+            change = new_minutes - old_minutes
+
+            seg.travel_minutes = new_minutes
+            seg.is_custom = True
+
+            shift_delta = change
+            if change > 0:
+                space = route.empty_space_between(seg.from_entry_id, seg.to_entry_id)
+                if space and space.duration_minutes > 0:
+                    consume = min(change, space.duration_minutes)
+                    space.duration_minutes -= consume
+                    if space.duration_minutes <= 0:
+                        route.empty_spaces.remove(space)
+                    shift_delta = change - consume
+
+            if shift_delta != 0:
+                to_entry = next((e for e in route.entries if e.id == seg.to_entry_id), None)
+                if to_entry:
+                    self._recalc.shift_following_entries(route, to_entry.id, shift_delta,
+                                                         include_anchor=True)
+
+            self._recalc.recalculate(route)
             self._route_scene.rebuild_route(route)
             self._autosave.mark_dirty(route_id)
 
@@ -681,39 +935,44 @@ class MainWindow(QMainWindow):
             self._travel_svc.request_travel_time(
                 new_entry.api_address, nxt.api_address, mode)
 
-    # ------------------------------------------------------------------
-    # Office template
-    # ------------------------------------------------------------------
-
     @Slot()
-    def _on_office_edit(self):
-        """Called after the user double-click-edited the template in the scene."""
-        self._db.save_office_template(self._office_template)
-        self._pool_scene.update_template(self._office_template)
-
-    # ------------------------------------------------------------------
-    # Minimum time policy
-    # ------------------------------------------------------------------
-
-    @Slot(int)
-    def _on_min_time_changed(self, value: int):
-        self._settings.minimum_time_between_visits = value
-        self._autosave.mark_dirty()
-
-    @Slot()
-    def _on_apply_min_time(self):
+    def _on_time_integrity(self):
         for route in self._routes.values():
-            self._recalc.apply_minimum_time(
-                route, self._settings.minimum_time_between_visits)
+            self._recalc.recalculate(route)
             self._route_scene.rebuild_route(route)
         self._autosave.flush_now()
 
     @Slot()
-    def _on_strip_empty_space(self):
-        for route in self._routes.values():
-            self._recalc.strip_extra_empty_space(route)
-            self._route_scene.rebuild_route(route)
-        self._autosave.flush_now()
+    def _on_block_visibility_changed(self):
+        self._route_scene.set_block_visibility(
+            self._show_travel_action.isChecked(),
+            self._show_space_action.isChecked(),
+        )
+
+    @Slot()
+    def _on_reset_all(self):
+        reply = QMessageBox.question(
+            self, "Rensa allt",
+            "Detta tar bort alla rutter och besök från planeringen. Fortsätta?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        current_state = self._db.export_state()
+        self._db.import_state({
+            "visits": [],
+            "routes": [],
+            "route_visit_order": [],
+            "travel_segments": [],
+            "empty_spaces": [],
+            "settings": current_state.get("settings", []),
+            "column_order": current_state.get("column_order", []),
+            "office_template": current_state.get("office_template", []),
+        })
+        self._load_data()
+        self._autosave.clear()
+        QMessageBox.information(self, "Rensat", "All planering har rensats.")
 
     # ------------------------------------------------------------------
     # Default travel mode
@@ -811,7 +1070,6 @@ class MainWindow(QMainWindow):
                 self._travel_svc.set_api_key(new_key)
             self._db.save_settings(self._settings)
             # Sync toolbar widgets
-            self._min_time_spin.setValue(self._settings.minimum_time_between_visits)
             self._on_font_size_changed(self._settings.font_size)
             idx = self._mode_combo.findData(self._settings.default_travel_mode)
             if idx >= 0:
@@ -897,8 +1155,8 @@ class MainWindow(QMainWindow):
                     "Kontor" if entry.is_office_instance else "Besök",
                     entry.display_name,
                     entry.display_address,
-                    entry.start_time,
-                    entry.end_time,
+                    _display_time(entry.start_time),
+                    _display_time(entry.end_time),
                     entry.display_insatser,
                 ])
 

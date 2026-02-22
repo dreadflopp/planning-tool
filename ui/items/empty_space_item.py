@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QPainter, QPen, QColor, QFont
-from PySide6.QtWidgets import QGraphicsObject
+from PySide6.QtWidgets import QGraphicsObject, QGraphicsSceneMouseEvent
 
 from domain.models import EmptySpace
 from domain.constants import (
@@ -17,6 +17,8 @@ _PAD = 6
 
 class EmptySpaceItem(QGraphicsObject):
     """Blue block showing unused time in a route."""
+
+    remove_requested = Signal(object)
 
     def __init__(self, space: EmptySpace, font_size: int = 12, parent=None):
         super().__init__(parent)
@@ -58,8 +60,27 @@ class EmptySpaceItem(QGraphicsObject):
 
         painter.setFont(QFont("Segoe UI", max(fs - 3, 7)))
         painter.setPen(QColor("#0D47A1"))
-        label = (f"{self._space.start_time} – {self._space.end_time}  "
-                 f"({self._space.duration_minutes} min ledig)")
-        painter.drawText(QRectF(_PAD, 0, w - _PAD * 2, h),
+        label = f"Lucka: {self._space.duration_minutes} min"
+        painter.drawText(QRectF(_PAD, 0, w - 44, h),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          label)
+
+        remove_rect = QRectF(w - 34, 4, 28, h - 8)
+        painter.setPen(QPen(QColor("#0D47A1"), 1))
+        painter.drawRoundedRect(remove_rect, 3, 3)
+        painter.setFont(QFont("Segoe UI", max(fs - 2, 8), QFont.Weight.Bold))
+        painter.drawText(remove_rect, Qt.AlignmentFlag.AlignCenter, "✕")
+
+    def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            w, h = self.width(), self.height()
+            pos = event.pos()
+            remove_rect = QRectF(w - 34, 4, 28, h - 8)
+            if remove_rect.contains(pos):
+                self.remove_requested.emit(self)
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)

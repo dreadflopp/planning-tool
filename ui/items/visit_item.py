@@ -6,15 +6,17 @@ from typing import Optional, TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QRectF, Signal, QPointF, QMimeData
 from PySide6.QtGui import (
-    QPainter, QPen, QColor, QFont, QBrush, QDrag, QPixmap, QPainterPath,
+    QPainter, QPen, QColor, QFont, QBrush, QDrag, QPixmap, QPainterPath, QFontMetrics,
 )
 from PySide6.QtWidgets import QGraphicsObject, QGraphicsSceneMouseEvent, QInputDialog
+from PySide6.QtWidgets import QMenu
 
 from domain.models import RouteEntry, Visit, VisitColor
 from domain.constants import (
     VISIT_WIDTH, VISIT_HEIGHT,
     COLOR_VISIT_BG, COLOR_VISIT_BORDER,
     COLOR_VISIT_GREEN, COLOR_VISIT_PINK, COLOR_VISIT_BLUE,
+    COLOR_VISIT_RED, COLOR_VISIT_ORANGE, COLOR_VISIT_YELLOW, COLOR_VISIT_BLACK,
     COLOR_PAIR_HIGHLIGHT, COLOR_GREYED_OUT,
     MIME_ROUTE_ENTRY, MIME_POOL_VISIT,
 )
@@ -26,12 +28,28 @@ _COLOR_HEX = {
     VisitColor.GREEN: COLOR_VISIT_GREEN,
     VisitColor.PINK: COLOR_VISIT_PINK,
     VisitColor.BLUE: COLOR_VISIT_BLUE,
+    VisitColor.RED: COLOR_VISIT_RED,
+    VisitColor.ORANGE: COLOR_VISIT_ORANGE,
+    VisitColor.YELLOW: COLOR_VISIT_YELLOW,
+    VisitColor.BLACK: COLOR_VISIT_BLACK,
 }
+
+_CONTEXT_COLORS = [
+    ("Rosa", VisitColor.PINK),
+    ("Blå", VisitColor.BLUE),
+    ("Grön", VisitColor.GREEN),
+    ("Röd", VisitColor.RED),
+    ("Orange", VisitColor.ORANGE),
+    ("Gul", VisitColor.YELLOW),
+    ("Svart", VisitColor.BLACK),
+    ("Ingen", None),
+]
 
 _COLOR_STRIP_W = 6
 _PAD = 6
-_COL2_W = 52
-_COL3_W = 22
+_COL2_W = 54
+_COL3_W = 18
+_COL4_W = 18
 
 
 class VisitItem(QGraphicsObject):
@@ -48,6 +66,8 @@ class VisitItem(QGraphicsObject):
     duration_up_requested = Signal(object)
     duration_down_requested = Signal(object)
     selected = Signal(object)             # emits self on any left click
+    color_change_requested = Signal(object, object)  # (self, color|None)
+    remove_requested = Signal(object)     # emits self
 
     def __init__(self, entry: RouteEntry, font_size: int = 12,
                  in_route: bool = True, parent=None):
@@ -58,6 +78,7 @@ class VisitItem(QGraphicsObject):
         self._greyed_out = False
         self._highlight_pair = False
         self._selected = False
+        self._hover_action: Optional[str] = None
         self._drag_start: Optional[QPointF] = None
         self.setAcceptHoverEvents(True)
         self.setCacheMode(QGraphicsObject.CacheMode.DeviceCoordinateCache)
@@ -90,9 +111,27 @@ class VisitItem(QGraphicsObject):
             self._selected = selected
             self.update()
 
+    def _text_col_width(self) -> int:
+        w = self.width()
+        controls_w = (_COL2_W + _COL3_W + (_COL4_W if self._in_route else 0))
+        return max(80, w - controls_w - (_COLOR_STRIP_W + _PAD * 3))
+
+    def _wrapped_height(self, text: str, font: QFont, width: int, min_h: int = 0) -> int:
+        if not text:
+            return min_h
+        metrics = QFontMetrics(font)
+        rect = metrics.boundingRect(0, 0, width, 500, int(Qt.TextFlag.TextWordWrap), text)
+        return max(min_h, rect.height())
+
     def height(self) -> int:
         from controllers.route_layout_engine import _scaled
-        return _scaled(VISIT_HEIGHT, self._font_size)
+        base = _scaled(VISIT_HEIGHT, self._font_size)
+        fs = self._font_size
+        text_w = self._text_col_width()
+        name_h = self._wrapped_height(self._entry.display_name, QFont("Segoe UI", fs, QFont.Weight.Bold), text_w, min_h=max(fs + 4, 16))
+        ins_h = self._wrapped_height(self._entry.display_insatser, QFont("Segoe UI", max(fs - 3, 7)), text_w, min_h=0)
+        dynamic = _PAD + name_h + max(fs + 6, 14) + max(fs + 6, 14) + (ins_h if ins_h > 0 else 0) + _PAD
+        return max(base, dynamic)
 
     def width(self) -> int:
         from controllers.route_layout_engine import _scaled
@@ -137,38 +176,48 @@ class VisitItem(QGraphicsObject):
         text_color = QColor("#888888" if self._greyed_out else "#212121")
 
         col1_x = _COLOR_STRIP_W + _PAD
-        col2_x = w - (_COL2_W + _COL3_W) - _PAD if self._in_route else w - _COL2_W - _PAD
-        col3_x = w - _COL3_W - 2
+        control_w = _COL2_W + _COL3_W + (_COL4_W if self._in_route else 0)
+        col2_x = w - control_w - _PAD
+        col3_x = col2_x + _COL2_W
+        col4_x = col3_x + _COL3_W
+        text_w = max(80, col2_x - col1_x - _PAD)
+        line_h = max(fs + 6, 14)
+        y = _PAD
 
         # --- Column 1 ---
         name_font = QFont("Segoe UI", fs, QFont.Weight.Bold)
         painter.setFont(name_font)
         painter.setPen(text_color)
-        name_rect = QRectF(col1_x, _PAD, col2_x - col1_x - _PAD, h * 0.28)
-        painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        name_h = self._wrapped_height(self._entry.display_name, name_font, text_w, min_h=line_h)
+        name_rect = QRectF(col1_x, y, text_w, name_h)
+        painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
                          self._entry.display_name)
+        y += name_h
 
         small_font = QFont("Segoe UI", max(fs - 2, 7))
         painter.setFont(small_font)
 
-        time_str = f"{self._entry.start_time} – {self._entry.end_time}"
-        time_rect = QRectF(col1_x, h * 0.28, col2_x - col1_x - _PAD, h * 0.22)
+        from controllers.route_recalculation_engine import _display_time
+        time_str = f"{_display_time(self._entry.start_time)} – {_display_time(self._entry.end_time)}"
+        time_rect = QRectF(col1_x, y, text_w, line_h)
         painter.drawText(time_rect,
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          time_str)
+        y += line_h
 
-        addr_rect = QRectF(col1_x, h * 0.50, col2_x - col1_x - _PAD, h * 0.22)
+        addr_rect = QRectF(col1_x, y, text_w, line_h)
         painter.drawText(addr_rect,
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          self._entry.display_address)
+        y += line_h
 
         ins = self._entry.display_insatser
         if ins:
             ins_font = QFont("Segoe UI", max(fs - 3, 7))
             painter.setFont(ins_font)
-            ins_rect = QRectF(col1_x, h * 0.74, w - col1_x - _PAD, h * 0.22)
+            ins_rect = QRectF(col1_x, y, text_w, h - y - _PAD)
             painter.drawText(ins_rect,
-                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
                              ins)
 
         if not self._greyed_out:
@@ -187,22 +236,65 @@ class VisitItem(QGraphicsObject):
                              f"{dur}")
 
             if self._in_route:
-                # Duration arrows ▲▼
+                # Duration arrows ▲▼ (to the right of duration)
                 arrow_font = QFont("Segoe UI", max(fs - 3, 7))
                 painter.setFont(arrow_font)
-                painter.setPen(QColor("#1565C0"))
-                up_rect = QRectF(col2_x, h * 0.50, _COL2_W, h * 0.24)
-                dn_rect = QRectF(col2_x, h * 0.74, _COL2_W, h * 0.24)
+                up_rect, dn_rect = self._duration_arrow_rects(h, col3_x)
+                up_col = QColor("#42A5F5") if self._hover_action == "dur_up" else QColor("#1565C0")
+                dn_col = QColor("#42A5F5") if self._hover_action == "dur_dn" else QColor("#1565C0")
+                painter.setPen(up_col)
                 painter.drawText(up_rect, Qt.AlignmentFlag.AlignCenter, "▲")
+                painter.setPen(dn_col)
                 painter.drawText(dn_rect, Qt.AlignmentFlag.AlignCenter, "▼")
 
                 # --- Column 3: position arrows ---
-                painter.setPen(QColor("#555555"))
-                pos_up_rect = QRectF(col3_x, _PAD, _COL3_W, h * 0.5 - _PAD)
-                pos_dn_rect = QRectF(col3_x, h * 0.5, _COL3_W, h * 0.5 - _PAD)
+                pos_up_rect = QRectF(col4_x, _PAD, _COL4_W, h * 0.5 - _PAD)
+                pos_dn_rect = QRectF(col4_x, h * 0.5, _COL4_W, h * 0.5 - _PAD)
                 painter.setFont(arrow_font)
+                painter.setPen(QColor("#78909C") if self._hover_action == "pos_up" else QColor("#555555"))
                 painter.drawText(pos_up_rect, Qt.AlignmentFlag.AlignCenter, "↑")
+                painter.setPen(QColor("#78909C") if self._hover_action == "pos_dn" else QColor("#555555"))
                 painter.drawText(pos_dn_rect, Qt.AlignmentFlag.AlignCenter, "↓")
+
+    def _duration_arrow_rects(self, h: int, col3_x: float) -> tuple[QRectF, QRectF]:
+        top_h = h * 0.5 - _PAD
+        half = top_h / 2
+        up_rect = QRectF(col3_x, _PAD, _COL3_W, half)
+        dn_rect = QRectF(col3_x, _PAD + half, _COL3_W, half)
+        return up_rect, dn_rect
+
+    def _hit_action(self, pos: QPointF) -> Optional[str]:
+        if not self._in_route:
+            return None
+        w, h = self.width(), self.height()
+        col2_x = w - (_COL2_W + _COL3_W + _COL4_W) - _PAD
+        col3_x = col2_x + _COL2_W
+        col4_x = col3_x + _COL3_W
+        up_rect, dn_rect = self._duration_arrow_rects(h, col3_x)
+        pos_up_rect = QRectF(col4_x, _PAD, _COL4_W, h * 0.5 - _PAD)
+        pos_dn_rect = QRectF(col4_x, h * 0.5, _COL4_W, h * 0.5 - _PAD)
+        if up_rect.contains(pos):
+            return "dur_up"
+        if dn_rect.contains(pos):
+            return "dur_dn"
+        if pos_up_rect.contains(pos):
+            return "pos_up"
+        if pos_dn_rect.contains(pos):
+            return "pos_dn"
+        return None
+
+    def hoverMoveEvent(self, event):
+        new_action = self._hit_action(event.pos())
+        if new_action != self._hover_action:
+            self._hover_action = new_action
+            self.update()
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        if self._hover_action is not None:
+            self._hover_action = None
+            self.update()
+        super().hoverLeaveEvent(event)
 
     # ------------------------------------------------------------------
     # Mouse events
@@ -223,34 +315,45 @@ class VisitItem(QGraphicsObject):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
+        if event.button() == Qt.MouseButton.RightButton and self._in_route:
+            menu = QMenu()
+            color_menu = menu.addMenu("Färg")
+            for label, color_value in _CONTEXT_COLORS:
+                act = color_menu.addAction(label)
+                if (self._entry.display_color or None) == color_value:
+                    act.setCheckable(True)
+                    act.setChecked(True)
+                act.triggered.connect(
+                    lambda _checked=False, c=color_value: self.color_change_requested.emit(self, c)
+                )
+            menu.addSeparator()
+            remove_action = menu.addAction("Ta bort besök")
+            remove_action.triggered.connect(lambda: self.remove_requested.emit(self))
+            menu.exec(event.screenPos())
+            event.accept()
+            return
+
         self._drag_start = None
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.pos()
             w, h = self.width(), self.height()
             if self._in_route:
-                col2_x = w - (_COL2_W + _COL3_W) - _PAD
-                col3_x = w - _COL3_W - 2
-
-                # Duration up arrow
-                if (col2_x <= pos.x() <= col2_x + _COL2_W and
-                        h * 0.50 <= pos.y() <= h * 0.74):
+                action = self._hit_action(pos)
+                if action == "dur_up":
                     self.duration_up_requested.emit(self)
                     return
-                # Duration down arrow
-                if (col2_x <= pos.x() <= col2_x + _COL2_W and
-                        h * 0.74 <= pos.y() <= h):
+                if action == "dur_dn":
                     self.duration_down_requested.emit(self)
                     return
-                # Position up
-                if pos.x() >= col3_x and pos.y() < h * 0.5:
+                if action == "pos_up":
                     self.move_up_requested.emit(self)
                     return
-                # Position down
-                if pos.x() >= col3_x and pos.y() >= h * 0.5:
+                if action == "pos_dn":
                     self.move_down_requested.emit(self)
                     return
                 # Time range click (row 2)
                 col1_x = _COLOR_STRIP_W + _PAD
+                col2_x = w - (_COL2_W + _COL3_W + _COL4_W) - _PAD
                 if (col1_x <= pos.x() <= col2_x and
                         h * 0.28 <= pos.y() <= h * 0.50):
                     self.time_edit_requested.emit(self)
@@ -259,6 +362,23 @@ class VisitItem(QGraphicsObject):
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent):
         if self._in_route:
+            action = self._hit_action(event.pos())
+            if action == "dur_up":
+                self.duration_up_requested.emit(self)
+                event.accept()
+                return
+            if action == "dur_dn":
+                self.duration_down_requested.emit(self)
+                event.accept()
+                return
+            if action == "pos_up":
+                self.move_up_requested.emit(self)
+                event.accept()
+                return
+            if action == "pos_dn":
+                self.move_down_requested.emit(self)
+                event.accept()
+                return
             self.time_edit_requested.emit(self)
         super().mouseDoubleClickEvent(event)
 
@@ -312,8 +432,5 @@ class VisitItem(QGraphicsObject):
 
     @staticmethod
     def _hm_to_min(hhmm: str) -> int:
-        try:
-            h, m = hhmm.split(":")
-            return int(h) * 60 + int(m)
-        except Exception:
-            return 0
+        from controllers.route_recalculation_engine import _t2m
+        return _t2m(hhmm)

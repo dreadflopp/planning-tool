@@ -20,11 +20,19 @@ class VisitColor:
     GREEN = "green"
     PINK = "pink"
     BLUE = "blue"
+    RED = "red"
+    ORANGE = "orange"
+    YELLOW = "yellow"
+    BLACK = "black"
 
     SWEDISH_MAP = {
         "grön": "green",
         "rosa": "pink",
         "blå": "blue",
+        "röd": "red",
+        "orange": "orange",
+        "gul": "yellow",
+        "svart": "black",
     }
 
 
@@ -62,6 +70,7 @@ class RouteEntry:
     is_office_instance: bool = False
     office_name: str = ""
     office_address: str = ""
+    office_color: Optional[str] = "black"
     # Runtime-only
     visit: Optional[Visit] = field(default=None, compare=False, repr=False)
 
@@ -74,8 +83,10 @@ class RouteEntry:
     @property
     def display_address(self) -> str:
         if self.is_office_instance:
-            return self.office_address
-        return self.visit.address if self.visit else ""
+            return (self.office_address or "").split(",", 1)[0].strip()
+        if not self.visit:
+            return ""
+        return (self.visit.address or "").split(",", 1)[0].strip()
 
     @property
     def display_insatser(self) -> str:
@@ -86,7 +97,7 @@ class RouteEntry:
     @property
     def display_color(self) -> Optional[str]:
         if self.is_office_instance:
-            return None
+            return self.office_color or "black"
         return self.visit.color if self.visit else None
 
     @property

@@ -20,8 +20,16 @@ _COLOR_MAP = {
 
 
 def _strip_postal_and_city(address: str) -> str:
-    """Remove 5-digit Swedish postal code (e.g. '12345' or '123 45') and city."""
-    return re.sub(r"\s*\d{3}\s?\d{2}\s+\S.*$", "", address).strip()
+    """Display address is everything before first comma."""
+    return (address or "").split(",", 1)[0].strip()
+
+
+def _normalize_address_case(address: str) -> str:
+    """Normalize whitespace/case to avoid duplicates caused by uppercase variants."""
+    compact = re.sub(r"\s+", " ", (address or "").strip())
+    if not compact:
+        return ""
+    return compact.title()
 
 
 def _extract_street(address: str) -> str:
@@ -152,7 +160,8 @@ class ExcelImportService:
                 continue
             seen_object_ids[object_id] = 1
 
-            address = _strip_postal_and_city(raw_address)
+            normalized_full = _normalize_address_case(raw_address)
+            address = _normalize_address_case(_strip_postal_and_city(normalized_full))
             if not address:
                 result.skipped += 1
                 continue
@@ -180,7 +189,7 @@ class ExcelImportService:
                 insatser=insatser,
                 color=color,
                 raw_data=json.dumps(raw_data, ensure_ascii=False),
-                full_address=raw_address,  # original with postal code – used for travel API
+                full_address=normalized_full,  # normalized with postal code – used for travel API
             )
             visits.append(v)
             result.imported += 1

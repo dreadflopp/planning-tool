@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Optional, TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
-from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush
-from PySide6.QtWidgets import QGraphicsObject, QGraphicsSceneMouseEvent
+from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QFontMetrics
+from PySide6.QtWidgets import QGraphicsObject, QGraphicsSceneMouseEvent, QMenu
 
 from domain.models import Route, RouteEntry, TravelSegment, EmptySpace
 from domain.constants import (
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 _BTN_W = 26
 _BTN_H = 22
 _PAD = 6
+_TOP_ROW_H = _BTN_H + _PAD * 2
 
 
 class RouteColumnItem(QGraphicsObject):
@@ -43,9 +44,14 @@ class RouteColumnItem(QGraphicsObject):
     entry_time_edit = Signal(object, object)     # (column_item, visit_item)
     entry_duration_up = Signal(object, object)
     entry_duration_dn = Signal(object, object)
+    entry_color_change = Signal(object, object, object)  # (column_item, visit_item, color)
+    entry_remove = Signal(object, object)
     travel_mode_changed = Signal(object, object) # (column_item, travel_item)
     travel_edit_minutes = Signal(object, object)
+    travel_duration_up = Signal(object, object)
+    travel_duration_dn = Signal(object, object)
     travel_restore = Signal(object, object)
+    empty_remove = Signal(object, object)
     visit_selected = Signal(object, object)      # (column_item, visit_item)
 
     def __init__(self, route: Route, layout_engine, font_size: int = 12, parent=None):
@@ -53,6 +59,8 @@ class RouteColumnItem(QGraphicsObject):
         self._route = route
         self._layout = layout_engine
         self._font_size = font_size
+        self._show_travel = True
+        self._show_space = True
         self._visit_items: list[VisitItem] = []
         self._travel_items: list[TravelItem] = []
         self._empty_items: list[EmptySpaceItem] = []
@@ -74,7 +82,29 @@ class RouteColumnItem(QGraphicsObject):
 
     def header_height(self) -> int:
         from controllers.route_layout_engine import _scaled
-        return _scaled(HEADER_HEIGHT, self._font_size)
+        fs = self._font_size
+        min_notes_h = _scaled(30, fs)
+        notes_font = QFont("Segoe UI", max(fs - 2, 8))
+        metrics = QFontMetrics(notes_font)
+        notes_text = self._route.notes.strip() if self._route.notes else "Dubbelklicka här för anteckning"
+        notes_w = max(80, self.column_width() - _PAD * 2 - 8)
+        notes_h = metrics.boundingRect(
+            0, 0, int(notes_w), 5000,
+            int(Qt.TextFlag.TextWordWrap), notes_text,
+        ).height() + 10
+        return _TOP_ROW_H + max(min_notes_h, notes_h) + _PAD
+
+    def refresh_header(self):
+        self.prepareGeometryChange()
+        self._layout_children()
+        self.update()
+
+    def _name_rect(self, w: float) -> QRectF:
+        return QRectF(_PAD, _PAD, w - _BTN_W * 2 - _PAD * 3, _BTN_H)
+
+    def _notes_rect(self, w: float, hh: float) -> QRectF:
+        y = _TOP_ROW_H
+        return QRectF(_PAD, y, w - _PAD * 2, hh - y - _PAD)
 
     def total_height(self) -> int:
         return self.header_height() + sum(i.height() for i in self._all_items) + _PAD * 2
@@ -102,14 +132,25 @@ class RouteColumnItem(QGraphicsObject):
         self._layout_children()
         self.update()
 
-    def apply_filter(self, active_tags: set[str]):
+    def set_block_visibility(self, show_travel: bool, show_space: bool):
+        if self._show_travel == show_travel and self._show_space == show_space:
+            return
+        self._show_travel = show_travel
+        self._show_space = show_space
+        self.rebuild(animate=False)
+
+    def apply_filter(self, active_tags: set[str], mode: str = "or"):
         """Grey out visits that do not contain any of the active_tags."""
         for vi in self._visit_items:
             if not active_tags:
                 vi.set_greyed_out(False)
                 continue
             entry_tags = {t.strip() for t in vi.entry.display_insatser.split(",") if t.strip()}
-            vi.set_greyed_out(not bool(entry_tags & active_tags))
+            if mode == "and":
+                match = active_tags.issubset(entry_tags)
+            else:
+                match = bool(entry_tags & active_tags)
+            vi.set_greyed_out(not match)
 
     def highlight_pair(self, entry_id: Optional[int]):
         for vi in self._visit_items:
@@ -129,6 +170,21 @@ class RouteColumnItem(QGraphicsObject):
                 return self.scenePos().y() + y
             y += item.height()
         return self.scenePos().y() + y
+
+    def insert_index_for_scene_y(self, scene_y: float) -> int:
+        """Return route-entry insertion index for a given scene Y position."""
+        local_y = scene_y - self.scenePos().y()
+        hh = self.header_height()
+        y = hh + _PAD
+        entries = self._route.sorted_entries()
+        visit_idx = 0
+        for item in self._all_items:
+            if isinstance(item, VisitItem):
+                if local_y <= y + item.height() / 2:
+                    return visit_idx
+                visit_idx += 1
+            y += item.height()
+        return len(entries)
 
     def visit_item_for_entry(self, entry_id: int) -> Optional[VisitItem]:
         for vi in self._visit_items:
@@ -156,11 +212,11 @@ class RouteColumnItem(QGraphicsObject):
         painter.setPen(QPen(QColor("#B0BEC5"), 1))
         painter.drawRect(0, 0, w - 1, h - 1)
 
-        # Route name
+        # Route name (double-click editable)
         name_font = QFont("Segoe UI", fs + 1, QFont.Weight.Bold)
         painter.setFont(name_font)
         painter.setPen(QColor("#212121"))
-        name_rect = QRectF(_PAD, _PAD, w - _BTN_W * 2 - _PAD * 2, hh * 0.38)
+        name_rect = self._name_rect(w)
         painter.drawText(name_rect,
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          self._route.name)
@@ -177,43 +233,57 @@ class RouteColumnItem(QGraphicsObject):
             painter.setPen(QColor("#546E7A"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
-        # Notes / rename buttons
-        btn_y2 = hh * 0.45
-        r_rename = QRectF(_PAD, btn_y2, w * 0.45 - _PAD, _BTN_H)
-        r_notes = QRectF(w * 0.45, btn_y2, w * 0.45 - _PAD, _BTN_H)
-        r_delete = QRectF(w - _BTN_W - 2, btn_y2, _BTN_W, _BTN_H)
-        for rect, label, color in [
-            (r_rename, "Byt namn", "#78909C"),
-            (r_notes, "Anteckningar", "#78909C"),
-            (r_delete, "✕", "#EF5350"),
-        ]:
-            painter.setPen(QPen(QColor(color), 1))
-            painter.drawRoundedRect(rect, 3, 3)
-            painter.setPen(QColor(color))
-            painter.setFont(QFont("Segoe UI", max(fs - 3, 7)))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
-
-        # Notes preview
-        if self._route.notes:
-            painter.setFont(QFont("Segoe UI", max(fs - 3, 7)))
-            painter.setPen(QColor("#546E7A"))
-            notes_rect = QRectF(_PAD, hh * 0.72, w - _PAD * 2, hh * 0.24)
-            painter.drawText(notes_rect,
-                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                             self._route.notes[:60])
+        # Notes area (double-click editable)
+        notes_rect = self._notes_rect(w, hh)
+        painter.setPen(QPen(QColor("#B0BEC5"), 1))
+        painter.setBrush(QBrush(QColor("#FFFDE7")))
+        painter.drawRoundedRect(notes_rect, 4, 4)
+        painter.setFont(QFont("Segoe UI", max(fs - 2, 8)))
+        if self._route.notes.strip():
+            painter.setPen(QColor("#37474F"))
+            notes_text = self._route.notes
+        else:
+            painter.setPen(QColor("#90A4AE"))
+            notes_text = "Dubbelklicka här för anteckning"
+        painter.drawText(
+            notes_rect.adjusted(4, 2, -4, -2),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+            notes_text,
+        )
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
         event.accept()
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
-        if event.button() != Qt.MouseButton.LeftButton:
-            return super().mouseReleaseEvent(event)
         pos = event.pos()
         w = self.column_width()
         hh = self.header_height()
-        fs = self._font_size
-
         if pos.y() > hh:
+            return super().mouseReleaseEvent(event)
+
+        if event.button() == Qt.MouseButton.RightButton:
+            menu = QMenu()
+            act_rename = menu.addAction("Byt namn")
+            act_notes = menu.addAction("Redigera anteckningar")
+            menu.addSeparator()
+            act_delete = menu.addAction("Ta bort rutt")
+            chosen = menu.exec(event.screenPos())
+            if chosen == act_rename:
+                self.rename_requested.emit(self)
+                event.accept()
+                return
+            if chosen == act_notes:
+                self.notes_requested.emit(self)
+                event.accept()
+                return
+            if chosen == act_delete:
+                self.delete_requested.emit(self)
+                event.accept()
+                return
+            event.accept()
+            return
+
+        if event.button() != Qt.MouseButton.LeftButton:
             return super().mouseReleaseEvent(event)
 
         # Move buttons (top row)
@@ -227,21 +297,23 @@ class RouteColumnItem(QGraphicsObject):
             self.move_right_requested.emit(self)
             return
 
-        btn_y2 = hh * 0.45
-        r_rename = QRectF(_PAD, btn_y2, w * 0.45 - _PAD, _BTN_H)
-        r_notes = QRectF(w * 0.45, btn_y2, w * 0.45 - _PAD, _BTN_H)
-        r_delete = QRectF(w - _BTN_W - 2, btn_y2, _BTN_W, _BTN_H)
-        if r_rename.contains(pos):
-            self.rename_requested.emit(self)
-            return
-        if r_notes.contains(pos):
-            self.notes_requested.emit(self)
-            return
-        if r_delete.contains(pos):
-            self.delete_requested.emit(self)
-            return
-
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.pos()
+            w = self.column_width()
+            hh = self.header_height()
+            if pos.y() <= hh:
+                if self._name_rect(w).contains(pos):
+                    self.rename_requested.emit(self)
+                    event.accept()
+                    return
+                if self._notes_rect(w, hh).contains(pos):
+                    self.notes_requested.emit(self)
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
 
     # ------------------------------------------------------------------
     # Drop events (visits from pool or from other routes)
@@ -277,15 +349,16 @@ class RouteColumnItem(QGraphicsObject):
             if i < len(entries) - 1:
                 e_next = entries[i + 1]
                 seg = self._route.travel_segment_between(entry.id, e_next.id)
-                if seg and seg.travel_minutes > 0:
+                if self._show_travel and seg and seg.travel_minutes > 0:
                     ti = TravelItem(seg, self._font_size, parent=self)
                     self._connect_travel_item(ti)
                     self._travel_items.append(ti)
                     self._all_items.append(ti)
 
                 esp = self._route.empty_space_between(entry.id, e_next.id)
-                if esp and esp.duration_minutes > 0:
+                if self._show_space and esp and esp.duration_minutes > 0:
                     ei = EmptySpaceItem(esp, self._font_size, parent=self)
+                    self._connect_empty_item(ei)
                     self._empty_items.append(ei)
                     self._all_items.append(ei)
 
@@ -305,9 +378,16 @@ class RouteColumnItem(QGraphicsObject):
         vi.time_edit_requested.connect(lambda v: self.entry_time_edit.emit(self, v))
         vi.duration_up_requested.connect(lambda v: self.entry_duration_up.emit(self, v))
         vi.duration_down_requested.connect(lambda v: self.entry_duration_dn.emit(self, v))
+        vi.color_change_requested.connect(lambda v, c: self.entry_color_change.emit(self, v, c))
+        vi.remove_requested.connect(lambda v: self.entry_remove.emit(self, v))
         vi.selected.connect(lambda v, s=self: s.visit_selected.emit(s, v))
 
     def _connect_travel_item(self, ti: TravelItem):
         ti.mode_changed.connect(lambda t: self.travel_mode_changed.emit(self, t))
         ti.edit_minutes_requested.connect(lambda t: self.travel_edit_minutes.emit(self, t))
+        ti.duration_up_requested.connect(lambda t: self.travel_duration_up.emit(self, t))
+        ti.duration_down_requested.connect(lambda t: self.travel_duration_dn.emit(self, t))
         ti.restore_calculated_requested.connect(lambda t: self.travel_restore.emit(self, t))
+
+    def _connect_empty_item(self, ei: EmptySpaceItem):
+        ei.remove_requested.connect(lambda e: self.empty_remove.emit(self, e))

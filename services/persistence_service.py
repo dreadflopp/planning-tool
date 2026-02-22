@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS route_visit_order (
     end_time          TEXT    NOT NULL,
     is_office_instance INTEGER NOT NULL DEFAULT 0,
     office_name       TEXT    NOT NULL DEFAULT '',
-    office_address    TEXT    NOT NULL DEFAULT ''
+    office_address    TEXT    NOT NULL DEFAULT '',
+    office_color      TEXT    NOT NULL DEFAULT 'black'
 );
 
 CREATE TABLE IF NOT EXISTS travel_segments (
@@ -138,6 +139,13 @@ class PersistenceService:
         if "full_address" not in existing:
             self._conn.execute(
                 "ALTER TABLE visits ADD COLUMN full_address TEXT NOT NULL DEFAULT ''"
+            )
+
+        cur = self._conn.execute("PRAGMA table_info(route_visit_order)")
+        existing_route_cols = {row[1] for row in cur.fetchall()}
+        if "office_color" not in existing_route_cols:
+            self._conn.execute(
+                "ALTER TABLE route_visit_order ADD COLUMN office_color TEXT NOT NULL DEFAULT 'black'"
             )
 
     def close(self):
@@ -335,6 +343,7 @@ class PersistenceService:
                 is_office_instance=bool(r["is_office_instance"]),
                 office_name=r["office_name"],
                 office_address=r["office_address"],
+                office_color=r["office_color"] if "office_color" in r.keys() else "black",
             )
             if entry.visit_id and entry.visit_id in visits_by_id:
                 entry.visit = visits_by_id[entry.visit_id]
@@ -394,11 +403,12 @@ class PersistenceService:
         cur = self._conn.execute(
             """INSERT INTO route_visit_order
                (route_id, visit_id, position, start_time, end_time,
-                is_office_instance, office_name, office_address)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                                is_office_instance, office_name, office_address, office_color)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (entry.route_id, entry.visit_id, entry.position,
              entry.start_time, entry.end_time,
-             int(entry.is_office_instance), entry.office_name, entry.office_address),
+                         int(entry.is_office_instance), entry.office_name, entry.office_address,
+                         entry.office_color or "black"),
         )
         self._conn.commit()
         entry.id = cur.lastrowid
@@ -408,10 +418,10 @@ class PersistenceService:
         self._conn.execute(
             """UPDATE route_visit_order
                SET position=?, start_time=?, end_time=?,
-                   office_name=?, office_address=?
+                   office_name=?, office_address=?, office_color=?
                WHERE id=?""",
             (entry.position, entry.start_time, entry.end_time,
-             entry.office_name, entry.office_address, entry.id),
+             entry.office_name, entry.office_address, entry.office_color or "black", entry.id),
         )
         self._conn.commit()
 
@@ -425,8 +435,8 @@ class PersistenceService:
         """Bulk-update positions and times for all entries in a route."""
         for entry in route.entries:
             self._conn.execute(
-                "UPDATE route_visit_order SET position=?, start_time=?, end_time=? WHERE id=?",
-                (entry.position, entry.start_time, entry.end_time, entry.id),
+                "UPDATE route_visit_order SET position=?, start_time=?, end_time=?, office_color=? WHERE id=?",
+                (entry.position, entry.start_time, entry.end_time, entry.office_color or "black", entry.id),
             )
         self._conn.commit()
 
@@ -579,10 +589,12 @@ class PersistenceService:
                 "INSERT INTO routes VALUES (:id,:name,:notes,:display_order)", row
             )
         for row in state.get("route_visit_order", []):
+            row.setdefault("office_color", "black")
             self._conn.execute(
-                "INSERT INTO route_visit_order VALUES "
+                "INSERT INTO route_visit_order"
+                "(id,route_id,visit_id,position,start_time,end_time,is_office_instance,office_name,office_address,office_color) VALUES "
                 "(:id,:route_id,:visit_id,:position,:start_time,:end_time,"
-                ":is_office_instance,:office_name,:office_address)", row
+                ":is_office_instance,:office_name,:office_address,:office_color)", row
             )
         for row in state.get("travel_segments", []):
             self._conn.execute(

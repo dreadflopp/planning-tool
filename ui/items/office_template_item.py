@@ -1,14 +1,15 @@
-"""OfficeTemplateItem – the reusable office/template visit in the pool."""
+"""OfficeTemplateItem – fixed draggable default-template visits in the pool."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal
-from PySide6.QtGui import QPainter, QPen, QColor, QFont, QDrag, QPixmap
-from PySide6.QtWidgets import QGraphicsObject, QGraphicsSceneMouseEvent, QInputDialog
+import re
 
-from domain.models import OfficeTemplate
+from PySide6.QtCore import Qt, QRectF, QPointF
+from PySide6.QtGui import QPainter, QPen, QColor, QFont, QDrag, QPixmap
+from PySide6.QtWidgets import QGraphicsObject, QGraphicsSceneMouseEvent
+
 from domain.constants import (
-    VISIT_WIDTH, OFFICE_TEMPLATE_HEIGHT, MIME_OFFICE_TEMPLATE,
+    VISIT_WIDTH, VISIT_HEIGHT, MIME_OFFICE_TEMPLATE,
 )
 from PySide6.QtCore import QMimeData
 
@@ -18,22 +19,22 @@ _PAD = 6
 class OfficeTemplateItem(QGraphicsObject):
     """
     Fixed item at the top of the pool panel.
-    Drag it to a route to create an office visit instance.
-    Double-click the name line to edit name, double-click the address line to edit address.
+    Drag it to a route to create a default office-type visit instance.
     """
 
-    template_changed = Signal()  # emitted after any edit so main window can persist
-
-    def __init__(self, template: OfficeTemplate, font_size: int = 12, parent=None):
+    def __init__(self, name: str, full_address: str, duration_minutes: int,
+                 font_size: int = 12, parent=None):
         super().__init__(parent)
-        self._template = template
+        self._name = name
+        self._full_address = full_address
+        self._duration = max(1, duration_minutes)
         self._font_size = font_size
         self._drag_start: QPointF | None = None
         self.setAcceptHoverEvents(True)
 
-    @property
-    def template(self) -> OfficeTemplate:
-        return self._template
+    @staticmethod
+    def _display_address(full_address: str) -> str:
+        return re.sub(r"\s*\d{3}\s?\d{2}\s+\S.*$", "", full_address).strip()
 
     def width(self) -> int:
         from controllers.route_layout_engine import _scaled
@@ -41,7 +42,7 @@ class OfficeTemplateItem(QGraphicsObject):
 
     def height(self) -> int:
         from controllers.route_layout_engine import _scaled
-        return _scaled(OFFICE_TEMPLATE_HEIGHT, self._font_size)
+        return _scaled(VISIT_HEIGHT, self._font_size)
 
     def set_font_size(self, size: int):
         self._font_size = size
@@ -63,35 +64,36 @@ class OfficeTemplateItem(QGraphicsObject):
         w, h = self.width(), self.height()
         fs = self._font_size
 
-        painter.fillRect(0, 0, w, h, QColor("#FFF3E0"))
-        painter.setPen(QPen(QColor("#FF8F00"), 2))
+        painter.fillRect(0, 0, w, h, QColor("#FAFAFA"))
+        painter.fillRect(0, 0, 6, h, QColor("#212121"))
+        painter.setPen(QPen(QColor("#9E9E9E"), 1))
         painter.drawRect(1, 1, w - 2, h - 2)
-
-        # Hint: double-click to edit
-        painter.setFont(QFont("Segoe UI", max(fs - 4, 6)))
-        painter.setPen(QColor("#FFCC80"))
-        painter.drawText(
-            QRectF(w - 120, 2, 116, 12),
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            "dubbelklick för att redigera",
-        )
 
         # Name row
         painter.setFont(QFont("Segoe UI", fs, QFont.Weight.Bold))
-        painter.setPen(QColor("#E65100"))
+        painter.setPen(QColor("#212121"))
         painter.drawText(
             self._name_rect(),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            f"📋  {self._template.name}",
+            self._name,
         )
 
         # Address row
         painter.setFont(QFont("Segoe UI", max(fs - 2, 7)))
-        painter.setPen(QColor("#BF360C"))
+        painter.setPen(QColor("#424242"))
         painter.drawText(
             self._addr_rect(),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            self._template.address or "  (dubbelklicka för att ange adress)",
+            self._display_address(self._full_address),
+        )
+
+        # Duration (shown before placement)
+        painter.setFont(QFont("Segoe UI", fs + 1, QFont.Weight.Bold))
+        painter.setPen(QColor("#1565C0"))
+        painter.drawText(
+            QRectF(w - 54, 0, 52, h),
+            Qt.AlignmentFlag.AlignCenter,
+            f"{self._duration}",
         )
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
@@ -111,34 +113,6 @@ class OfficeTemplateItem(QGraphicsObject):
         self._drag_start = None
         super().mouseReleaseEvent(event)
 
-    def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent):
-        pos = event.pos()
-        if self._name_rect().contains(pos):
-            self._edit_name()
-        elif self._addr_rect().contains(pos):
-            self._edit_address()
-        event.accept()
-
-    def _edit_name(self):
-        text, ok = QInputDialog.getText(
-            None, "Redigera namn", "Namn på mallbesöket:",
-            text=self._template.name,
-        )
-        if ok and text.strip():
-            self._template.name = text.strip()
-            self.template_changed.emit()
-            self.update()
-
-    def _edit_address(self):
-        text, ok = QInputDialog.getText(
-            None, "Redigera adress", "Adress för mallbesöket:",
-            text=self._template.address,
-        )
-        if ok:
-            self._template.address = text.strip()
-            self.template_changed.emit()
-            self.update()
-
     def _start_drag(self, event: QGraphicsSceneMouseEvent):
         import json
         drag = QDrag(event.widget())
@@ -146,8 +120,9 @@ class OfficeTemplateItem(QGraphicsObject):
         mime.setData(
             MIME_OFFICE_TEMPLATE,
             json.dumps({
-                "name": self._template.name,
-                "address": self._template.address,
+                "name": self._name,
+                "address": self._full_address,
+                "duration_minutes": self._duration,
             }).encode(),
         )
         drag.setMimeData(mime)

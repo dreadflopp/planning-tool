@@ -9,7 +9,7 @@ from PySide6.QtCore import QPointF, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QGraphicsScene
 
-from domain.models import Visit, OfficeTemplate
+from domain.models import Visit
 from domain.constants import (
     VISIT_WIDTH, COLUMN_SPACING, OFFICE_TEMPLATE_HEIGHT, MIME_ROUTE_ENTRY,
 )
@@ -25,14 +25,13 @@ class PoolScene(QGraphicsScene):
     Handles drops (route entries returned to pool).
     """
 
-    office_edit_requested = Signal()
     entry_returned_to_pool = Signal(int)       # entry_id
     visit_selected = Signal(int)               # visit_id
 
     def __init__(self, layout_engine, parent=None):
         super().__init__(parent)
         self._layout = layout_engine
-        self._template_item: Optional[OfficeTemplateItem] = None
+        self._template_items: list[OfficeTemplateItem] = []
         self._column_items: list[PoolColumnItem] = []
         self.setBackgroundBrush(QColor("#ECEFF1"))
 
@@ -40,15 +39,21 @@ class PoolScene(QGraphicsScene):
     # Public API
     # ------------------------------------------------------------------
 
-    def load(self, template: OfficeTemplate, visits: list[Visit]):
+    def load(self, templates: list[dict], visits: list[Visit]):
         self.clear()
         self._column_items.clear()
-        self._template_item = None
+        self._template_items.clear()
 
-        # Office template at top
-        self._template_item = OfficeTemplateItem(template, self._layout.font_size)
-        self._template_item.template_changed.connect(self.office_edit_requested)
-        self.addItem(self._template_item)
+        # Default template visits at top
+        for template in templates:
+            item = OfficeTemplateItem(
+                name=template.get("name", "Kontor"),
+                full_address=template.get("address", ""),
+                duration_minutes=int(template.get("duration_minutes", 10)),
+                font_size=self._layout.font_size,
+            )
+            self.addItem(item)
+            self._template_items.append(item)
 
         # Group visits by street
         streets: dict[str, list[Visit]] = {}
@@ -88,20 +93,15 @@ class PoolScene(QGraphicsScene):
                     return
 
     def set_font_size(self, size: int):
-        if self._template_item:
-            self._template_item.set_font_size(size)
+        for item in self._template_items:
+            item.set_font_size(size)
         for col in self._column_items:
             col.set_font_size(size)
         self._reposition()
 
-    def update_template(self, template: OfficeTemplate):
-        if self._template_item:
-            self._template_item._template = template
-            self._template_item.update()
-
-    def apply_filter(self, active_tags: set[str]):
+    def apply_filter(self, active_tags: set[str], mode: str = "or"):
         for col in self._column_items:
-            col.apply_filter(active_tags)
+            col.apply_filter(active_tags, mode)
 
     def highlight_pair(self, visit_id: Optional[int]):
         for col in self._column_items:
@@ -160,11 +160,14 @@ class PoolScene(QGraphicsScene):
             lambda c, v: self.visit_selected.emit(v.entry.visit_id or -1))
 
     def _reposition(self, animate: bool = False):
-        fs = self._layout.font_size
         template_h = 0
-        if self._template_item:
-            self._template_item.setPos(0, 0)
-            template_h = self._template_item.height() + _TEMPLATE_MARGIN
+        x_t = 0
+        row_h = 0
+        for item in self._template_items:
+            item.setPos(x_t, 0)
+            x_t += item.width() + COLUMN_SPACING
+            row_h = max(row_h, item.height())
+        template_h = row_h + (_TEMPLATE_MARGIN if self._template_items else 0)
 
         items = sorted(self._column_items,
                        key=lambda c: self._get_column_order(c.street))

@@ -22,12 +22,16 @@ class TravelItem(QGraphicsObject):
 
     mode_changed = Signal(object)          # emits self (segment updated by caller)
     edit_minutes_requested = Signal(object)  # emits self
+    duration_up_requested = Signal(object)
+    duration_down_requested = Signal(object)
     restore_calculated_requested = Signal(object)
 
     def __init__(self, segment: TravelSegment, font_size: int = 12, parent=None):
         super().__init__(parent)
         self._seg = segment
         self._font_size = font_size
+        self._hover_action = None
+        self.setAcceptHoverEvents(True)
         self.setCacheMode(QGraphicsObject.CacheMode.DeviceCoordinateCache)
 
     @property
@@ -61,22 +65,39 @@ class TravelItem(QGraphicsObject):
 
         text_color = QColor("#5D4037")
         small = QFont("Segoe UI", max(fs - 2, 7))
-        normal = QFont("Segoe UI", fs)
 
-        # Time range
+        label_rect = QRectF(_PAD, _PAD, w * 0.45, h * 0.45)
         painter.setFont(small)
         painter.setPen(text_color)
-        time_str = (f"{self._seg.start_time} – {self._seg.end_time}  "
-                    f"({self._seg.travel_minutes} min)")
+        time_str = "Restid"
         if self._seg.is_custom:
             time_str += " ✎"
-        painter.drawText(QRectF(_PAD, _PAD, w * 0.65 - _PAD, h * 0.5),
+        painter.drawText(label_rect,
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          time_str)
 
+        dur_x = w * 0.45
+        dur_w = 44
+        painter.setFont(QFont("Segoe UI", fs + 1, QFont.Weight.Bold))
+        painter.setPen(QColor("#1565C0"))
+        painter.drawText(QRectF(dur_x, _PAD, dur_w, h * 0.5),
+                         Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
+                         f"{self._seg.travel_minutes}")
+
+        arrow_x = dur_x + dur_w
+        top_h = h * 0.5 - _PAD
+        half = top_h / 2
+        up_rect = QRectF(arrow_x, _PAD, 18, half)
+        dn_rect = QRectF(arrow_x, _PAD + half, 18, half)
+        painter.setFont(QFont("Segoe UI", max(fs - 3, 7)))
+        painter.setPen(QColor("#42A5F5") if self._hover_action == "dur_up" else QColor("#1565C0"))
+        painter.drawText(up_rect, Qt.AlignmentFlag.AlignCenter, "▲")
+        painter.setPen(QColor("#42A5F5") if self._hover_action == "dur_dn" else QColor("#1565C0"))
+        painter.drawText(dn_rect, Qt.AlignmentFlag.AlignCenter, "▼")
+
         # Mode button (right side, full height)
         mode_label = _MODE_LABELS.get(self._seg.mode, self._seg.mode)
-        mode_x = w * 0.65
+        mode_x = w * 0.72
         mode_rect = QRectF(mode_x, _PAD, w - mode_x - _PAD, h - _PAD * 2)
         painter.setFont(QFont("Segoe UI", max(fs - 1, 8), QFont.Weight.Bold))
         painter.setPen(QColor(COLOR_TRAVEL_BORDER))
@@ -96,11 +117,47 @@ class TravelItem(QGraphicsObject):
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
         event.accept()
 
+    def _hit_action(self, pos) -> str | None:
+        h = self.height()
+        w = self.width()
+        dur_x = w * 0.45
+        arrow_x = dur_x + 44
+        top_h = h * 0.5 - _PAD
+        half = top_h / 2
+        up_rect = QRectF(arrow_x, _PAD, 18, half)
+        dn_rect = QRectF(arrow_x, _PAD + half, 18, half)
+        if up_rect.contains(pos):
+            return "dur_up"
+        if dn_rect.contains(pos):
+            return "dur_dn"
+        return None
+
+    def hoverMoveEvent(self, event):
+        new_action = self._hit_action(event.pos())
+        if new_action != self._hover_action:
+            self._hover_action = new_action
+            self.update()
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        if self._hover_action is not None:
+            self._hover_action = None
+            self.update()
+        super().hoverLeaveEvent(event)
+
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
             w, h = self.width(), self.height()
             pos = event.pos()
-            mode_x = w * 0.65
+            mode_x = w * 0.72
+
+            action = self._hit_action(pos)
+            if action == "dur_up":
+                self.duration_up_requested.emit(self)
+                return
+            if action == "dur_dn":
+                self.duration_down_requested.emit(self)
+                return
 
             # Mode button click
             if pos.x() >= mode_x:
@@ -121,3 +178,16 @@ class TravelItem(QGraphicsObject):
                 self.edit_minutes_requested.emit(self)
 
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            action = self._hit_action(event.pos())
+            if action == "dur_up":
+                self.duration_up_requested.emit(self)
+                event.accept()
+                return
+            if action == "dur_dn":
+                self.duration_down_requested.emit(self)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)

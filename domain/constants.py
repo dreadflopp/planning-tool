@@ -1,7 +1,7 @@
 """Visual and layout constants for the planning tool."""
 
 # Base dimensions (scaled by font_size_factor in layout engine)
-VISIT_WIDTH = 260
+VISIT_WIDTH = 278
 VISIT_HEIGHT = 90
 TRAVEL_HEIGHT = 52
 EMPTY_HEIGHT = 30
@@ -23,6 +23,10 @@ COLOR_POOL_COLUMN_BG = "#F0F4F8"
 COLOR_VISIT_GREEN = "#43A047"
 COLOR_VISIT_PINK = "#E91E63"
 COLOR_VISIT_BLUE = "#1E88E5"
+COLOR_VISIT_RED = "#E53935"
+COLOR_VISIT_ORANGE = "#FB8C00"
+COLOR_VISIT_YELLOW = "#FDD835"
+COLOR_VISIT_BLACK = "#212121"
 
 COLOR_PAIR_HIGHLIGHT = "#FF6F00"   # orange border for paired visit highlight
 COLOR_GREYED_OUT = "#BDBDBD"       # when filtered out

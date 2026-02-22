@@ -43,7 +43,7 @@ class PoolColumnItem(QGraphicsObject):
                  font_size: int = 12, parent=None):
         super().__init__(parent)
         self._street = street
-        self._visits = sorted(visits, key=lambda v: v.address)
+        self._visits = sorted(visits, key=lambda v: (v.default_start or "", (v.name or "").lower()))
         self._font_size = font_size
         self._visit_items: list[VisitItem] = []
         self._build_children()
@@ -76,7 +76,7 @@ class PoolColumnItem(QGraphicsObject):
     def add_visit(self, visit: Visit, animate: bool = False):
         """Re-insert a visit that was dragged back from a route."""
         self._visits.append(visit)
-        self._visits.sort(key=lambda v: v.address)
+        self._visits.sort(key=lambda v: (v.default_start or "", (v.name or "").lower()))
         self._rebuild(animate)
 
     def remove_visit(self, visit_id: int):
@@ -91,13 +91,17 @@ class PoolColumnItem(QGraphicsObject):
         self._layout_children()
         self.update()
 
-    def apply_filter(self, active_tags: set[str]):
+    def apply_filter(self, active_tags: set[str], mode: str = "or"):
         for vi in self._visit_items:
             if not active_tags:
                 vi.set_greyed_out(False)
                 continue
             entry_tags = {t.strip() for t in vi.entry.display_insatser.split(",") if t.strip()}
-            vi.set_greyed_out(not bool(entry_tags & active_tags))
+            if mode == "and":
+                match = active_tags.issubset(entry_tags)
+            else:
+                match = bool(entry_tags & active_tags)
+            vi.set_greyed_out(not match)
 
     def highlight_pair(self, visit_id: Optional[int]):
         for vi in self._visit_items:

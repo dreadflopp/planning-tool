@@ -3,12 +3,13 @@ RouteRecalculationEngine
 ========================
 Recalculates all TravelSegments and EmptySpaces in a route after any mutation.
 Rules:
-  - Segments are contiguous: travel starts at entry.end_time.
+    - Segments are contiguous with half-open semantics [start, end).
+        Example: 07:00–07:30 means 30 minutes.
+        Next block starts exactly at 07:30.
   - Same address ⇒ travel_minutes = 0 (no travel block displayed).
   - If next_visit.start < travel_end ⇒ cascade-push next visit forward.
-  - empty_duration = next_visit.start - travel_end  (may be 0, never negative).
-  - 'Apply Minimum Time' shifts start/end times (preserving duration) so that
-    (travel + empty) >= min_time for every gap.
+    - EmptySpace blocks are explicit/manual only.
+        They are not auto-created from incidental timing differences.
 """
 
 from __future__ import annotations
@@ -19,18 +20,36 @@ from services.travel_time_service import TravelTimeService
 
 
 def _t2m(hhmm: str) -> int:
-    """HH:MM → minutes since midnight."""
+    """Time string → absolute minutes.
+
+    Accepts either HH:MM (day 0) or "D<day> HH:MM".
+    """
     try:
-        h, m = hhmm.split(":")
-        return int(h) * 60 + int(m)
+        text = (hhmm or "").strip()
+        day = 0
+        if text.startswith("D") and " " in text:
+            day_part, text = text.split(" ", 1)
+            day = int(day_part[1:])
+        h, m = text.split(":")
+        return day * 1440 + int(h) * 60 + int(m)
     except Exception:
         return 0
 
 
 def _m2t(minutes: int) -> str:
-    """Minutes since midnight → HH:MM (clamped 0–1439)."""
-    minutes = max(0, min(1439, minutes))
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+    """Absolute minutes → HH:MM or D<day> HH:MM."""
+    minutes = max(0, minutes)
+    day = minutes // 1440
+    rem = minutes % 1440
+    hhmm = f"{rem // 60:02d}:{rem % 60:02d}"
+    if day <= 0:
+        return hhmm
+    return f"D{day} {hhmm}"
+
+
+def _display_time(time_value: str) -> str:
+    """Return display HH:MM for any internal time representation."""
+    return _m2t(_t2m(time_value)).split(" ")[-1]
 
 
 class RouteRecalculationEngine:
@@ -75,18 +94,15 @@ class RouteRecalculationEngine:
 
             e_from_end = _t2m(e_from.end_time)
             travel_start = e_from_end
-            travel_end = e_from_end + travel_min
+            travel_end = travel_start + travel_min
+            esp = route.empty_space_between(e_from.id, e_to.id)
+            manual_space = max(0, esp.duration_minutes) if esp else 0
+            target_to_start = travel_end + manual_space
 
-            e_to_start = _t2m(e_to.start_time)
-
-            # Cascade: push next entry if it starts before travel ends
-            if e_to_start < travel_end:
-                duration = _t2m(e_to.end_time) - _t2m(e_to.start_time)
-                e_to.start_time = _m2t(travel_end)
-                e_to.end_time = _m2t(travel_end + duration)
-                e_to_start = travel_end
-
-            empty_duration = max(0, e_to_start - travel_end)
+            duration = _t2m(e_to.end_time) - _t2m(e_to.start_time)
+            if _t2m(e_to.start_time) != target_to_start:
+                e_to.start_time = _m2t(target_to_start)
+                e_to.end_time = _m2t(target_to_start + duration)
 
             # Update or create TravelSegment
             seg = route.travel_segment_between(e_from.id, e_to.id)
@@ -103,23 +119,35 @@ class RouteRecalculationEngine:
             seg.start_time = _m2t(travel_start)
             seg.end_time = _m2t(travel_end)
 
-            # Update or create EmptySpace
-            esp = route.empty_space_between(e_from.id, e_to.id)
-            if esp is None:
-                esp = EmptySpace(
-                    id=None, route_id=route.id,
-                    from_entry_id=e_from.id, to_entry_id=e_to.id,
-                    duration_minutes=empty_duration,
-                )
-                route.empty_spaces.append(esp)
-            else:
-                esp.duration_minutes = empty_duration
-            esp.start_time = _m2t(travel_end)
-            esp.end_time = _m2t(travel_end + empty_duration)
+            if esp is not None:
+                esp.duration_minutes = manual_space
+                esp.start_time = _m2t(travel_end)
+                esp.end_time = _m2t(travel_end + manual_space)
 
         # Remove stale segments/spaces for pairs that no longer exist
         self._prune_stale(route, entries)
         self._persist(route)
+
+    def shift_following_entries(self, route: Route, anchor_entry_id: int,
+                                delta_minutes: int,
+                                include_anchor: bool = False) -> None:
+        """Shift the time of all entries after anchor by delta minutes.
+
+        Positive delta shifts later; negative shifts earlier.
+        """
+        if delta_minutes == 0:
+            return
+        entries = route.sorted_entries()
+        idx = next((i for i, e in enumerate(entries) if e.id == anchor_entry_id), None)
+        if idx is None:
+            return
+        start_idx = idx if include_anchor else idx + 1
+        for i in range(start_idx, len(entries)):
+            e = entries[i]
+            duration = _t2m(e.end_time) - _t2m(e.start_time)
+            new_start = max(0, _t2m(e.start_time) + delta_minutes)
+            e.start_time = _m2t(new_start)
+            e.end_time = _m2t(new_start + duration)
 
     def recalculate_after_entry_time_change(self, route: Route,
                                              changed_entry: RouteEntry) -> None:
@@ -152,95 +180,57 @@ class RouteRecalculationEngine:
                 )
 
             e_from_end = _t2m(e_from.end_time)
-            travel_end = e_from_end + travel_min
+            travel_start = e_from_end
+            travel_end = travel_start + travel_min
+            earliest_to_start = travel_end
             e_to_start = _t2m(e_to.start_time)
 
-            if e_to_start < travel_end:
+            if e_to_start < earliest_to_start:
                 duration = _t2m(e_to.end_time) - _t2m(e_to.start_time)
-                e_to.start_time = _m2t(travel_end)
-                e_to.end_time = _m2t(travel_end + duration)
-                e_to_start = travel_end
+                e_to.start_time = _m2t(earliest_to_start)
+                e_to.end_time = _m2t(earliest_to_start + duration)
+                e_to_start = earliest_to_start
 
-            empty_duration = max(0, e_to_start - travel_end)
+            empty_duration = max(0, e_to_start - earliest_to_start)
 
             seg = route.travel_segment_between(e_from.id, e_to.id)
             if seg:
                 if not seg.is_custom:
                     seg.travel_minutes = travel_min
-                seg.start_time = _m2t(e_from_end)
+                seg.start_time = _m2t(travel_start)
                 seg.end_time = _m2t(travel_end)
 
             esp = route.empty_space_between(e_from.id, e_to.id)
             if esp:
                 esp.duration_minutes = empty_duration
-                esp.start_time = _m2t(travel_end)
-                esp.end_time = _m2t(travel_end + empty_duration)
+                esp.start_time = _m2t(earliest_to_start)
+                esp.end_time = _m2t(earliest_to_start + empty_duration)
 
         self._persist(route)
 
-    def apply_minimum_time(self, route: Route, min_time: int) -> None:
-        """
-        Shift entry start/end times so that (travel + empty) >= min_time
-        for every consecutive pair. Cascades forward through all entries.
-        """
-        entries = route.sorted_entries()
-        for i in range(len(entries) - 1):
-            e_from = entries[i]
-            e_to = entries[i + 1]
-
-            seg = route.travel_segment_between(e_from.id, e_to.id)
-            travel_min = seg.travel_minutes if seg else 0
-
-            effective_min = max(travel_min, min_time)
-            e_from_end = _t2m(e_from.end_time)
-            e_to_start = _t2m(e_to.start_time)
-            current_gap = e_to_start - e_from_end
-
-            if current_gap < effective_min:
-                shift = effective_min - current_gap
-                for j in range(i + 1, len(entries)):
-                    duration = _t2m(entries[j].end_time) - _t2m(entries[j].start_time)
-                    entries[j].start_time = _m2t(_t2m(entries[j].start_time) + shift)
-                    entries[j].end_time = _m2t(_t2m(entries[j].start_time) + duration)
-
-        self.recalculate(route)
-
-    def strip_extra_empty_space(self, route: Route) -> None:
-        """
-        Remove all empty space from a route by collapsing each gap to just
-        the travel time. Each entry is moved as early as possible.
-        """
-        entries = route.sorted_entries()
-        for i in range(1, len(entries)):
-            e_prev = entries[i - 1]
-            e_curr = entries[i]
-            seg = route.travel_segment_between(e_prev.id, e_curr.id)
-            travel_min = seg.travel_minutes if seg else 0
-
-            new_start = _t2m(e_prev.end_time) + travel_min
-            duration = _t2m(e_curr.end_time) - _t2m(e_curr.start_time)
-            e_curr.start_time = _m2t(new_start)
-            e_curr.end_time = _m2t(new_start + duration)
-
-        self.recalculate(route)
-
     def add_entry_to_route(self, route: Route, entry: RouteEntry,
-                           default_mode: str) -> None:
+                           default_mode: str, insert_index: int | None = None) -> None:
         """
-        Place a new entry at the end of the route. Sets start time to
-        the next available minute after the last item.
+        Place a new entry in route. If insert_index is omitted, append.
         """
         entries = route.sorted_entries()
-        if entries:
-            last = entries[-1]
-            last_seg = route.travel_segment_between(last.id, None)
-            # Calculate earliest possible start
-            last_end = _t2m(last.end_time)
-            from_addr = last.api_address
+        if insert_index is None:
+            insert_index = len(entries)
+        insert_index = max(0, min(insert_index, len(entries)))
+
+        duration = max(1, _t2m(entry.end_time) - _t2m(entry.start_time))
+        if insert_index < len(entries):
+            # Insert *between* visits at the current start time of the target slot.
+            # Placement ignores existing travel/space internals and is based only
+            # on between-visit position.
+            new_start = _t2m(entries[insert_index].start_time)
+        elif insert_index > 0:
+            prev = entries[insert_index - 1]
+            from_addr = prev.api_address
             to_addr = entry.api_address
             if from_addr and to_addr and (
                     from_addr == to_addr or
-                    last.display_address == entry.display_address):
+                    prev.display_address == entry.display_address):
                 travel_min = 0
             else:
                 cached = self._travel.get_travel_minutes(from_addr, to_addr, default_mode)
@@ -248,18 +238,32 @@ class RouteRecalculationEngine:
                     cached if cached is not None
                     else self._travel.get_default_minutes(default_mode)
                 )
-            new_start = last_end + travel_min
-            duration = _t2m(entry.end_time) - _t2m(entry.start_time)
-            entry.start_time = _m2t(new_start)
-            entry.end_time = _m2t(new_start + duration)
-        entry.position = len(entries)
+            new_start = _t2m(prev.end_time) + travel_min
+        else:
+            new_start = _t2m(entry.start_time)
+
+        entry.start_time = _m2t(new_start)
+        entry.end_time = _m2t(new_start + duration)
+        entry.position = insert_index
         entry.route_id = route.id
+
+        # Shift existing positions at/after insert slot to avoid position collisions.
+        for existing in entries:
+            if existing.position >= insert_index:
+                existing.position += 1
+
         self._db.add_route_entry(entry)
         route.entries.append(entry)
 
+        # Re-number positions
+        for pos, existing in enumerate(route.sorted_entries()):
+            existing.position = pos
+
         # Create default travel segment and empty space for the new pair
-        if entries:
-            last = entries[-1]
+        ordered = route.sorted_entries()
+        idx = next((i for i, e in enumerate(ordered) if e.id == entry.id), None)
+        if idx is not None and idx > 0:
+            last = ordered[idx - 1]
             seg = TravelSegment(
                 id=None, route_id=route.id,
                 from_entry_id=last.id, to_entry_id=entry.id,
@@ -269,6 +273,20 @@ class RouteRecalculationEngine:
             esp = EmptySpace(
                 id=None, route_id=route.id,
                 from_entry_id=last.id, to_entry_id=entry.id,
+                duration_minutes=0,
+            )
+            route.empty_spaces.append(esp)
+        if idx is not None and idx < len(ordered) - 1:
+            nxt = ordered[idx + 1]
+            seg = TravelSegment(
+                id=None, route_id=route.id,
+                from_entry_id=entry.id, to_entry_id=nxt.id,
+                mode=default_mode, travel_minutes=0,
+            )
+            route.travel_segments.append(seg)
+            esp = EmptySpace(
+                id=None, route_id=route.id,
+                from_entry_id=entry.id, to_entry_id=nxt.id,
                 duration_minutes=0,
             )
             route.empty_spaces.append(esp)
@@ -346,14 +364,20 @@ class RouteRecalculationEngine:
 
     def set_custom_travel_minutes(self, route: Route, seg: TravelSegment,
                                    minutes: int) -> None:
+        old = max(0, seg.travel_minutes)
         seg.travel_minutes = minutes
         seg.is_custom = True
+        delta = max(0, minutes) - old
+        self.shift_following_entries(route, seg.to_entry_id, delta, include_anchor=True)
         self.recalculate(route)
 
     def restore_calculated_travel(self, route: Route, seg: TravelSegment) -> None:
+        old = max(0, seg.travel_minutes)
         if seg.calculated_minutes is not None:
             seg.travel_minutes = seg.calculated_minutes
             seg.is_custom = False
+        delta = max(0, seg.travel_minutes) - old
+        self.shift_following_entries(route, seg.to_entry_id, delta, include_anchor=True)
         self.recalculate(route)
 
     # ------------------------------------------------------------------
@@ -375,7 +399,7 @@ class RouteRecalculationEngine:
         ]
         route.empty_spaces = [
             s for s in route.empty_spaces
-            if (s.from_entry_id, s.to_entry_id) in valid_pairs
+            if (s.from_entry_id, s.to_entry_id) in valid_pairs and s.duration_minutes > 0
         ]
 
     def _persist(self, route: Route):
