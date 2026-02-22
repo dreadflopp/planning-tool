@@ -116,6 +116,7 @@ class RouteRecalculationEngine:
             else:
                 if not seg.is_custom:
                     seg.travel_minutes = travel_min
+                    seg.calculated_minutes = travel_min
             seg.start_time = _m2t(travel_start)
             seg.end_time = _m2t(travel_end)
 
@@ -197,6 +198,7 @@ class RouteRecalculationEngine:
             if seg:
                 if not seg.is_custom:
                     seg.travel_minutes = travel_min
+                    seg.calculated_minutes = travel_min
                 seg.start_time = _m2t(travel_start)
                 seg.end_time = _m2t(travel_end)
 
@@ -373,8 +375,14 @@ class RouteRecalculationEngine:
 
     def restore_calculated_travel(self, route: Route, seg: TravelSegment) -> None:
         old = max(0, seg.travel_minutes)
-        if seg.calculated_minutes is not None:
-            seg.travel_minutes = seg.calculated_minutes
+        restored = seg.calculated_minutes
+        if restored is None:
+            restored = self._calculate_minutes_for_segment(route, seg)
+            if restored is not None:
+                seg.calculated_minutes = restored
+
+        if restored is not None:
+            seg.travel_minutes = max(0, restored)
             seg.is_custom = False
         delta = max(0, seg.travel_minutes) - old
         self.shift_following_entries(route, seg.to_entry_id, delta, include_anchor=True)
@@ -387,6 +395,25 @@ class RouteRecalculationEngine:
     def _get_mode(self, route: Route, from_id: int, to_id: int) -> str:
         seg = route.travel_segment_between(from_id, to_id)
         return seg.mode if seg else TravelMode.CAR
+
+    def _calculate_minutes_for_segment(self, route: Route,
+                                       seg: TravelSegment) -> int | None:
+        from_entry = next((e for e in route.entries if e.id == seg.from_entry_id), None)
+        to_entry = next((e for e in route.entries if e.id == seg.to_entry_id), None)
+        if not from_entry or not to_entry:
+            return None
+
+        from_addr = from_entry.api_address
+        to_addr = to_entry.api_address
+        if from_addr and to_addr and (
+                from_addr == to_addr or
+                from_entry.display_address == to_entry.display_address):
+            return 0
+
+        cached = self._travel.get_travel_minutes(from_addr, to_addr, seg.mode)
+        if cached is not None:
+            return cached
+        return self._travel.get_default_minutes(seg.mode)
 
     def _prune_stale(self, route: Route, current_entries: list[RouteEntry]):
         valid_pairs = {

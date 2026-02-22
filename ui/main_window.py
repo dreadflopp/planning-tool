@@ -804,6 +804,8 @@ class MainWindow(QMainWindow):
         new_minutes = max(0, old_minutes + delta)
         change = new_minutes - old_minutes
 
+        if not seg.is_custom:
+            seg.calculated_minutes = old_minutes
         seg.travel_minutes = new_minutes
         seg.is_custom = True
 
@@ -845,6 +847,8 @@ class MainWindow(QMainWindow):
             new_minutes = max(0, val)
             change = new_minutes - old_minutes
 
+            if not seg.is_custom:
+                seg.calculated_minutes = old_minutes
             seg.travel_minutes = new_minutes
             seg.is_custom = True
 
