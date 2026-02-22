@@ -184,20 +184,25 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
 
-        # Import
-        act_import = QAction("Importera Excel", self)
-        act_import.triggered.connect(self._on_import_excel)
-        tb.addAction(act_import)
-
-        # Export
-        act_export_state = QAction("Spara planering", self)
-        act_export_state.triggered.connect(self._on_export_state)
-        tb.addAction(act_export_state)
-
+        # Planfil
         act_import_state = QAction("Öppna planering", self)
         act_import_state.triggered.connect(self._on_import_state)
         tb.addAction(act_import_state)
 
+        act_export_state = QAction("Spara planering", self)
+        act_export_state.triggered.connect(self._on_export_state)
+        tb.addAction(act_export_state)
+
+        tb.addSeparator()
+
+        # Inläsning (källdata)
+        act_import = QAction("Importera Excel", self)
+        act_import.triggered.connect(self._on_import_excel)
+        tb.addAction(act_import)
+
+        tb.addSeparator()
+
+        # Export (resultat)
         act_export_excel = QAction("Exportera Excel", self)
         act_export_excel.triggered.connect(self._on_export_excel)
         tb.addAction(act_export_excel)
@@ -208,20 +213,18 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        # Add route
+        # Planering
         act_add_route = QAction("＋ Ny rutt", self)
         act_add_route.triggered.connect(self._on_add_route)
         tb.addAction(act_add_route)
 
-        tb.addSeparator()
-
-        # Travel API status
-        act_travel_log = QAction("API-logg", self)
-        act_travel_log.triggered.connect(self._show_travel_status)
-        tb.addAction(act_travel_log)
+        act_integrity = QAction("Tidsintegritet", self)
+        act_integrity.triggered.connect(self._on_time_integrity)
+        tb.addAction(act_integrity)
 
         tb.addSeparator()
 
+        # Visning
         self._show_travel_action = QAction("Restid", self)
         self._show_travel_action.setCheckable(True)
         self._show_travel_action.setChecked(bool(self._settings.show_travel_blocks))
@@ -242,7 +245,20 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        self._extra_time_auto_action = QAction("Auto Extratid", self)
+        # Tidsinställningar
+        tb.addWidget(QLabel(" Färdsätt: "))
+        self._mode_combo = QComboBox()
+        for mode, label in [(TravelMode.CAR, "Bil"),
+                             (TravelMode.BIKE, "Cykel"),
+                             (TravelMode.WALK, "Gång")]:
+            self._mode_combo.addItem(label, mode)
+        idx = self._mode_combo.findData(self._settings.default_travel_mode)
+        if idx >= 0:
+            self._mode_combo.setCurrentIndex(idx)
+        self._mode_combo.currentIndexChanged.connect(self._on_default_mode_changed)
+        tb.addWidget(self._mode_combo)
+
+        self._extra_time_auto_action = QAction("Auto extratid", self)
         self._extra_time_auto_action.setCheckable(True)
         self._extra_time_auto_action.setChecked(bool(self._settings.extra_time_auto_place))
         self._extra_time_auto_action.toggled.connect(self._on_extra_time_auto_toggled)
@@ -258,32 +274,20 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        # Default travel mode
-        tb.addWidget(QLabel(" Färdsätt: "))
-        self._mode_combo = QComboBox()
-        for mode, label in [(TravelMode.CAR, "Bil"),
-                             (TravelMode.BIKE, "Cykel"),
-                             (TravelMode.WALK, "Gång")]:
-            self._mode_combo.addItem(label, mode)
-        idx = self._mode_combo.findData(self._settings.default_travel_mode)
-        if idx >= 0:
-            self._mode_combo.setCurrentIndex(idx)
-        self._mode_combo.currentIndexChanged.connect(self._on_default_mode_changed)
-        tb.addWidget(self._mode_combo)
-
-        act_integrity = QAction("Tidsintegritet", self)
-        act_integrity.triggered.connect(self._on_time_integrity)
-        tb.addAction(act_integrity)
-
-        act_reset_all = QAction("Rensa allt", self)
-        act_reset_all.triggered.connect(self._on_reset_all)
-        tb.addAction(act_reset_all)
-
-        tb.addSeparator()
+        # System
+        act_travel_log = QAction("API-logg", self)
+        act_travel_log.triggered.connect(self._show_travel_status)
+        tb.addAction(act_travel_log)
 
         act_settings = QAction("Inställningar", self)
         act_settings.triggered.connect(self._on_open_settings)
         tb.addAction(act_settings)
+
+        tb.addSeparator()
+
+        act_reset_all = QAction("Rensa allt", self)
+        act_reset_all.triggered.connect(self._on_reset_all)
+        tb.addAction(act_reset_all)
 
     def _wire_route_scene(self):
         s = self._route_scene
