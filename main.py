@@ -1,14 +1,30 @@
 """Application entry point."""
 
+import os
 import sys
+from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QTimer
 
-from ui.splash_screen import SplashScreen
+def _configure_webengine_for_network_path() -> None:
+    app_dir = Path(__file__).resolve().parent
+    if not str(app_dir).startswith("\\\\"):
+        return
+
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+    current_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip()
+    if "--no-sandbox" not in current_flags:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+            f"{current_flags} --no-sandbox".strip()
+        )
 
 
 def main():
+    _configure_webengine_for_network_path()
+
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt, QTimer
+    from ui.splash_screen import SplashScreen
+
     # High-DPI support
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -17,6 +33,12 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Planeringsverktyg")
     app.setOrganizationName("Hemtjänst")
+
+    # Configure WebEngine after app is created
+    from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
+    profile = QWebEngineProfile.defaultProfile()
+    profile.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+    profile.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
 
     splash = SplashScreen(app)
     splash.show()

@@ -9,6 +9,7 @@ import json
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, Slot, QTimer, QRectF
@@ -47,22 +48,42 @@ from ui.items.visit_item import VisitItem
 from ui.visit_map_window import VisitMapWindow
 
 
-_SETTINGS_FILE = "settings.ini"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_SETTINGS_FILE = _PROJECT_ROOT / "settings.ini"
 
 
 def _load_api_key() -> str:
     cfg = configparser.ConfigParser()
-    cfg.read(_SETTINGS_FILE)
-    return cfg.get("api", "key", fallback="")
+    cfg.read(str(_SETTINGS_FILE), encoding="utf-8")
+    key = cfg.get("api", "key", fallback="").strip()
+    if key:
+        return key
+
+    legacy_path = Path.cwd() / "settings.ini"
+    try:
+        same_file = legacy_path.resolve() == _SETTINGS_FILE.resolve()
+    except Exception:
+        same_file = False
+
+    if not same_file and legacy_path.exists():
+        legacy_cfg = configparser.ConfigParser()
+        legacy_cfg.read(str(legacy_path), encoding="utf-8")
+        legacy_key = legacy_cfg.get("api", "key", fallback="").strip()
+        if legacy_key:
+            _save_api_key(legacy_key)
+            return legacy_key
+
+    return ""
 
 
 def _save_api_key(key: str):
     cfg = configparser.ConfigParser()
-    cfg.read(_SETTINGS_FILE)
+    cfg.read(str(_SETTINGS_FILE), encoding="utf-8")
     if "api" not in cfg:
         cfg["api"] = {}
     cfg["api"]["key"] = key
-    with open(_SETTINGS_FILE, "w") as f:
+    _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
         cfg.write(f)
 
 
