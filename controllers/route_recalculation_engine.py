@@ -239,10 +239,7 @@ class RouteRecalculationEngine:
                 travel_min = 0
             else:
                 cached = self._travel.get_travel_minutes(from_addr, to_addr, default_mode)
-                travel_min = (
-                    cached if cached is not None
-                    else self._travel.get_default_minutes(default_mode)
-                )
+                travel_min = cached if cached is not None else 0
             new_start = _t2m(prev.end_time) + travel_min
         else:
             new_start = _t2m(entry.start_time)
@@ -272,8 +269,9 @@ class RouteRecalculationEngine:
             seg = TravelSegment(
                 id=None, route_id=route.id,
                 from_entry_id=last.id, to_entry_id=entry.id,
-                mode=default_mode, travel_minutes=0,
+                mode=default_mode, travel_minutes=0, is_custom=False,
             )
+            seg.is_calculating = True
             route.travel_segments.append(seg)
             esp = EmptySpace(
                 id=None, route_id=route.id,
@@ -286,8 +284,9 @@ class RouteRecalculationEngine:
             seg = TravelSegment(
                 id=None, route_id=route.id,
                 from_entry_id=entry.id, to_entry_id=nxt.id,
-                mode=default_mode, travel_minutes=0,
+                mode=default_mode, travel_minutes=0, is_custom=False,
             )
+            seg.is_calculating = True
             route.travel_segments.append(seg)
             esp = EmptySpace(
                 id=None, route_id=route.id,
@@ -435,12 +434,12 @@ class RouteRecalculationEngine:
                 return max(0, int(seg.travel_minutes))
             if seg.is_calculating:
                 return max(0, int(seg.travel_minutes))
-            if seg.travel_time_state == TravelTimeState.DEFAULT:
-                return self._travel.get_default_minutes(mode)
 
         cached = self._travel.get_travel_minutes(from_addr, to_addr, mode)
         if cached is not None:
             return cached
+        if seg is not None:
+            return max(0, int(seg.travel_minutes))
         return self._travel.get_default_minutes(mode)
 
     def _prune_stale(self, route: Route, current_entries: list[RouteEntry]):

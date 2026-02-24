@@ -154,8 +154,8 @@ There exists a default Office visit template.
 
 Between each pair of visits:
 
--   TravelTime block (yellow)
--   EmptySpace block (blue)
+-   TravelTime block (default grey, calculated yellow)
+-   EmptySpace block (white)
 -   Or both logically
 
 TravelTime block shows:

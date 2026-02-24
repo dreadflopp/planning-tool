@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QPointF, Signal
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsSceneMouseEvent, QGraphicsLineItem, QInputDialog
 
-from domain.models import Route, RouteEntry, TravelMode
+from domain.models import Route, RouteEntry, TravelMode, Visit
 from domain.constants import (
     VISIT_WIDTH, COLUMN_SPACING, MIME_POOL_VISIT, MIME_ROUTE_ENTRY, MIME_OFFICE_TEMPLATE,
     MIME_EXTRA_TIME_TEMPLATE,
@@ -31,6 +31,7 @@ class RouteScene(QGraphicsScene):
     column_reorder_requested = Signal(int, int)   # (route_id, direction: -1/+1)
     route_renamed = Signal(int, str)               # (route_id, new_name)
     route_notes_changed = Signal(int, str)
+    route_color_changed = Signal(int, object)      # (route_id, color|None)
     route_delete_requested = Signal(int)
     entry_dropped = Signal(int, object)            # (route_id, RouteEntry-like dict)
     entry_moved = Signal(int, int, int)            # (route_id, entry_id, direction)
@@ -38,6 +39,8 @@ class RouteScene(QGraphicsScene):
     entry_duration_changed = Signal(int, int, int) # (route_id, entry_id, delta_minutes)
     entry_color_changed = Signal(int, int, object) # (route_id, entry_id, color|None)
     entry_remove_requested = Signal(int, int)      # (route_id, entry_id)
+    entry_pair_requested = Signal(int, int)        # (route_id, entry_id)
+    entry_unpair_requested = Signal(int, int)      # (route_id, entry_id)
     empty_remove = Signal(int, int, int)           # (route_id, from_entry_id, to_entry_id)
     extra_time_remove = Signal(int, int)           # (route_id, to_entry_id)
     travel_mode_changed = Signal(int, int, str)    # (route_id, seg_id, mode)
@@ -143,10 +146,32 @@ class RouteScene(QGraphicsScene):
         for col in self._column_items:
             col.apply_filter(active_tags, mode)
 
+    def apply_search(self, query: str):
+        for col in self._column_items:
+            col.apply_search(query)
+
     def highlight_pair(self, route_id: Optional[int], entry_id: Optional[int]):
         for col in self._column_items:
             if route_id is None or col.route.id == route_id:
                 col.highlight_pair(entry_id)
+
+    def highlight_same_name_address(self, visit_id: Optional[int], all_visits: dict[int, 'Visit']):
+        """Highlight visits that share name+address with the selected visit."""
+        same_ids: set[int] = set()
+        if visit_id:
+            source_visit = all_visits.get(visit_id)
+            if source_visit:
+                source_name = (source_visit.name or "").strip().lower()
+                source_address = (source_visit.address or "").strip().lower()
+                for v in all_visits.values():
+                    if v.id == visit_id:
+                        continue
+                    if ((v.name or "").strip().lower() == source_name and
+                            (v.address or "").strip().lower() == source_address):
+                        same_ids.add(v.id)
+
+        for col in self._column_items:
+            col.highlight_same_name_address(same_ids)
 
     def set_selected_entry(self, route_id: Optional[int], entry_id: Optional[int]):
         """Highlight the selected visit item and clear all others."""
@@ -162,8 +187,15 @@ class RouteScene(QGraphicsScene):
         idx = next((i for i, c in enumerate(items) if c.route.id == route_id), None)
         if idx is None:
             return
-        target = idx + direction
+        if direction <= -999:
+            target = 0
+        elif direction >= 999:
+            target = len(items) - 1
+        else:
+            target = idx + direction
         if target < 0 or target >= len(items):
+            return
+        if target == idx:
             return
 
         moved = items.pop(idx)
@@ -172,6 +204,7 @@ class RouteScene(QGraphicsScene):
             col.route.display_order = order
 
         self._reposition_columns(animate=True)
+        self.column_reorder_requested.emit(route_id, direction)
 
     def pop_visit(self, route_id: int, entry_id: Optional[int] = None, visit_index: Optional[int] = None):
         col = self._find_column(route_id)
@@ -289,10 +322,16 @@ class RouteScene(QGraphicsScene):
             lambda c: self.move_column(c.route.id, -1))
         col.move_right_requested.connect(
             lambda c: self.move_column(c.route.id, +1))
+        col.move_start_requested.connect(
+            lambda c: self.move_column(c.route.id, -999))
+        col.move_end_requested.connect(
+            lambda c: self.move_column(c.route.id, +999))
         col.visit_selected.connect(
             lambda c, v: self.visit_selected.emit(c.route.id, v.entry.id))
         col.rename_requested.connect(self._on_rename)
         col.notes_requested.connect(self._on_notes)
+        col.route_color_requested.connect(
+            lambda c, color: self.route_color_changed.emit(c.route.id, color))
         col.delete_requested.connect(
             lambda c: self.route_delete_requested.emit(c.route.id))
         col.entry_move_up.connect(
@@ -309,6 +348,10 @@ class RouteScene(QGraphicsScene):
             lambda c, v, color: self.entry_color_changed.emit(c.route.id, v.entry.id, color))
         col.entry_remove.connect(
             lambda c, v: self.entry_remove_requested.emit(c.route.id, v.entry.id))
+        col.entry_pair_requested.connect(
+            lambda c, v: self.entry_pair_requested.emit(c.route.id, v.entry.id))
+        col.entry_unpair_requested.connect(
+            lambda c, v: self.entry_unpair_requested.emit(c.route.id, v.entry.id))
         col.empty_remove.connect(
             lambda c, e: self.empty_remove.emit(
                 c.route.id,

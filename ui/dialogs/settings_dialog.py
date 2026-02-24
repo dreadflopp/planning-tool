@@ -81,7 +81,7 @@ class SettingsDialog(QDialog):
         self._mode_combo = QComboBox()
         for mode, label in [(TravelMode.CAR, "Bil"),
                              (TravelMode.BIKE, "Cykel"),
-                             (TravelMode.WALK, "Gång")]:
+                             (TravelMode.WALK, "Gå")]:
             self._mode_combo.addItem(label, mode)
         idx = self._mode_combo.findData(settings.default_travel_mode)
         if idx >= 0:

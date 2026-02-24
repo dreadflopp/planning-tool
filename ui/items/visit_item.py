@@ -68,6 +68,8 @@ class VisitItem(QGraphicsObject):
     selected = Signal(object)             # emits self on any left click
     color_change_requested = Signal(object, object)  # (self, color|None)
     remove_requested = Signal(object)     # emits self
+    pair_requested = Signal(object)       # emits self
+    unpair_requested = Signal(object)     # emits self
     _color_hex: dict[str, str] = dict(_COLOR_HEX)
 
     def __init__(self, entry: RouteEntry, font_size: int = 12,
@@ -78,6 +80,7 @@ class VisitItem(QGraphicsObject):
         self._in_route = in_route
         self._greyed_out = False
         self._highlight_pair = False
+        self._highlight_same_name_address = False
         self._selected = False
         self._inconsistent = False
         self._is_dragging = False
@@ -124,6 +127,11 @@ class VisitItem(QGraphicsObject):
     def set_pair_highlight(self, highlighted: bool):
         if self._highlight_pair != highlighted:
             self._highlight_pair = highlighted
+            self.update()
+
+    def set_same_name_address_highlight(self, highlighted: bool):
+        if self._highlight_same_name_address != highlighted:
+            self._highlight_same_name_address = highlighted
             self.update()
 
     def set_selected(self, selected: bool):
@@ -228,7 +236,7 @@ class VisitItem(QGraphicsObject):
             strip_color = QColor(self._color_hex.get(color_key, COLOR_VISIT_BG))
             painter.fillRect(0, 0, _COLOR_STRIP_W, h, strip_color)
 
-        # Border: selection > pair highlight > normal
+        # Border: selection > pair highlight > same-name-address > normal
         if self._inconsistent:
             pen = QPen(QColor("#C62828"), 3)
         elif self._is_dragging:
@@ -236,7 +244,9 @@ class VisitItem(QGraphicsObject):
         elif self._selected:
             pen = QPen(QColor("#1565C0"), 3)
         elif self._highlight_pair:
-            pen = QPen(QColor(COLOR_PAIR_HIGHLIGHT), 3)
+            pen = QPen(QColor(COLOR_PAIR_HIGHLIGHT), 3)  # orange
+        elif self._highlight_same_name_address:
+            pen = QPen(QColor("#1E88E5"), 2)  # blue
         else:
             pen = QPen(QColor(COLOR_VISIT_BORDER), 1)
         painter.setPen(pen)
@@ -359,6 +369,15 @@ class VisitItem(QGraphicsObject):
             return "pos_dn"
         return None
 
+    def _is_time_interval_hit(self, pos: QPointF) -> bool:
+        if not self._in_route:
+            return False
+        w, h = self.width(), self.height()
+        col1_x = _COLOR_STRIP_W + _PAD
+        col2_x = w - (_COL2_W + _COL3_W + _COL4_W) - _PAD
+        return (col1_x <= pos.x() <= col2_x and
+                h * 0.28 <= pos.y() <= h * 0.50)
+
     def hoverMoveEvent(self, event):
         new_action = self._hit_action(event.pos())
         if new_action != self._hover_action:
@@ -391,7 +410,7 @@ class VisitItem(QGraphicsObject):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
-        if event.button() == Qt.MouseButton.RightButton and self._in_route:
+        if event.button() == Qt.MouseButton.RightButton:
             menu = QMenu()
             color_menu = menu.addMenu("Färg")
             for label, color_value in _CONTEXT_COLORS:
@@ -402,6 +421,17 @@ class VisitItem(QGraphicsObject):
                 act.triggered.connect(
                     lambda _checked=False, c=color_value: self.color_change_requested.emit(self, c)
                 )
+            visit = self._entry.visit
+            visit_id = self._entry.visit_id
+            is_paired = bool(visit_id and visit and visit.pair_partner_id)
+            if visit_id:
+                menu.addSeparator()
+                if is_paired:
+                    unpair_action = menu.addAction("Avpara")
+                    unpair_action.triggered.connect(lambda: self.unpair_requested.emit(self))
+                else:
+                    pair_action = menu.addAction("Para")
+                    pair_action.triggered.connect(lambda: self.pair_requested.emit(self))
             menu.addSeparator()
             remove_action = menu.addAction("Ta bort besök")
             remove_action.triggered.connect(lambda: self.remove_requested.emit(self))
@@ -412,7 +442,6 @@ class VisitItem(QGraphicsObject):
         self._drag_start = None
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.pos()
-            w, h = self.width(), self.height()
             if self._in_route:
                 action = self._hit_action(pos)
                 if action == "dur_up":
@@ -427,18 +456,12 @@ class VisitItem(QGraphicsObject):
                 if action == "pos_dn":
                     self.move_down_requested.emit(self)
                     return
-                # Time range click (row 2)
-                col1_x = _COLOR_STRIP_W + _PAD
-                col2_x = w - (_COL2_W + _COL3_W + _COL4_W) - _PAD
-                if (col1_x <= pos.x() <= col2_x and
-                        h * 0.28 <= pos.y() <= h * 0.50):
-                    self.time_edit_requested.emit(self)
-                    return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent):
         if self._in_route:
-            action = self._hit_action(event.pos())
+            pos = event.pos()
+            action = self._hit_action(pos)
             if action == "dur_up":
                 self.duration_up_requested.emit(self)
                 event.accept()
@@ -455,7 +478,10 @@ class VisitItem(QGraphicsObject):
                 self.move_down_requested.emit(self)
                 event.accept()
                 return
-            self.time_edit_requested.emit(self)
+            if self._is_time_interval_hit(pos):
+                self.time_edit_requested.emit(self)
+                event.accept()
+                return
         super().mouseDoubleClickEvent(event)
 
     # ------------------------------------------------------------------

@@ -46,12 +46,12 @@ class ExtraTimeTemplateItem(QGraphicsObject):
         w, h = self.width(), self.height()
         fs = self._font_size
 
-        painter.fillRect(0, 0, w, h, QColor("#E8F5E9"))
-        painter.setPen(QPen(QColor("#2E7D32"), 1))
+        painter.fillRect(0, 0, w, h, QColor("#BBDEFB"))
+        painter.setPen(QPen(QColor("#64B5F6"), 1))
         painter.drawRect(1, 1, w - 2, h - 2)
 
         painter.setFont(QFont("Segoe UI", max(fs - 3, 7)))
-        painter.setPen(QColor("#1B5E20"))
+        painter.setPen(QColor("#0D47A1"))
         painter.drawText(
             QRectF(_PAD, 0, w - _PAD * 2, h),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,

@@ -28,6 +28,9 @@ class PoolScene(QGraphicsScene):
 
     entry_returned_to_pool = Signal(int)       # entry_id
     visit_selected = Signal(int)               # visit_id
+    visit_pair_requested = Signal(int)         # visit_id
+    visit_unpair_requested = Signal(int)       # visit_id
+    column_order_changed = Signal()
 
     def __init__(self, layout_engine, parent=None):
         super().__init__(parent)
@@ -35,6 +38,7 @@ class PoolScene(QGraphicsScene):
         self._template_items: list[OfficeTemplateItem] = []
         self._extra_time_template: Optional[ExtraTimeTemplateItem] = None
         self._column_items: list[PoolColumnItem] = []
+        self._saved_order_by_street: dict[str, int] = {}
         self.setBackgroundBrush(QColor("#ECEFF1"))
 
     # ------------------------------------------------------------------
@@ -87,12 +91,15 @@ class PoolScene(QGraphicsScene):
         col = self._find_column_for_street(visit.street or "Övriga")
         if col:
             col.add_visit(visit, animate)
+            col.setVisible(True)
         else:
             col = PoolColumnItem(visit.street or "Övriga", [visit], self._layout.font_size)
+            col._display_order = self._saved_order_by_street.get(col.street, self._next_display_order())
             self._wire_column(col)
             self.addItem(col)
             self._column_items.append(col)
             self._normalize_column_orders()
+        self._saved_order_by_street[col.street] = getattr(col, "_display_order", 0)
         self._reposition(animate)
 
     def remove_visit(self, visit_id: int):
@@ -102,9 +109,7 @@ class PoolScene(QGraphicsScene):
                 if v.id == visit_id:
                     col.remove_visit(visit_id)
                     if not col.visits:
-                        self.removeItem(col)
-                        self._column_items.remove(col)
-                        self._normalize_column_orders()
+                        col.setVisible(False)
                     self._reposition()
                     return
 
@@ -126,9 +131,41 @@ class PoolScene(QGraphicsScene):
         for col in self._column_items:
             col.apply_filter(active_tags, mode)
 
+    def apply_search(self, query: str):
+        for col in self._column_items:
+            col.apply_search(query)
+
+    def set_column_order_map(self, order_by_street: dict[str, int]):
+        self._saved_order_by_street = {
+            str(street): int(order)
+            for street, order in (order_by_street or {}).items()
+        }
+        for col in self._column_items:
+            if col.street in self._saved_order_by_street:
+                col._display_order = self._saved_order_by_street[col.street]
+        self._normalize_column_orders()
+        self._reposition()
+
+    def column_order_pairs(self) -> list[tuple[str, int]]:
+        return [(col.street, int(getattr(col, "_display_order", idx))) for idx, col in enumerate(self._ordered_columns())]
+
     def highlight_pair(self, visit_id: Optional[int]):
         for col in self._column_items:
             col.highlight_pair(visit_id)
+
+    def highlight_same_name_address(self, visit_id: Optional[int], all_visits: dict[int, 'Visit']):
+        """Highlight all visits with the same name and address (but different ID)."""
+        same_ids: set[int] = set()
+        if visit_id:
+            source_visit = all_visits.get(visit_id)
+            if source_visit:
+                for v in all_visits.values():
+                    if (v.id != visit_id and 
+                        v.name.strip().lower() == source_visit.name.strip().lower() and
+                        v.address.strip().lower() == source_visit.address.strip().lower()):
+                        same_ids.add(v.id)
+        for col in self._column_items:
+            col.highlight_same_name_address(same_ids)
 
     def set_selected_visit(self, visit_id: Optional[int]):
         for col in self._column_items:
@@ -139,16 +176,25 @@ class PoolScene(QGraphicsScene):
         idx = next((i for i, c in enumerate(items) if c.street == street), None)
         if idx is None:
             return
-        target = idx + direction
+        if direction <= -999:
+            target = 0
+        elif direction >= 999:
+            target = len(items) - 1
+        else:
+            target = idx + direction
         if target < 0 or target >= len(items):
+            return
+        if target == idx:
             return
 
         moved = items.pop(idx)
         items.insert(target, moved)
         for order, col in enumerate(items):
             col._display_order = order
+            self._saved_order_by_street[col.street] = order
 
         self._reposition(animate=True)
+        self.column_order_changed.emit()
 
     # ------------------------------------------------------------------
     # Drop (route entries returning to pool)
@@ -180,8 +226,16 @@ class PoolScene(QGraphicsScene):
             lambda c: self.move_column(c.street, -1))
         col.move_right_requested.connect(
             lambda c: self.move_column(c.street, +1))
+        col.move_start_requested.connect(
+            lambda c: self.move_column(c.street, -999))
+        col.move_end_requested.connect(
+            lambda c: self.move_column(c.street, +999))
         col.visit_selected.connect(
             lambda c, v: self.visit_selected.emit(v.entry.visit_id or -1))
+        col.visit_pair_requested.connect(
+            lambda c, v: self.visit_pair_requested.emit(v.entry.visit_id or -1))
+        col.visit_unpair_requested.connect(
+            lambda c, v: self.visit_unpair_requested.emit(v.entry.visit_id or -1))
 
     def _reposition(self, animate: bool = False):
         template_h = 0
@@ -204,6 +258,9 @@ class PoolScene(QGraphicsScene):
         items = self._ordered_columns()
         x = 0
         for col in items:
+            col.setVisible(bool(col.visits))
+            if not col.isVisible():
+                continue
             target = QPointF(x, template_h)
             if animate:
                 self._layout._move_item(col, target, animate=True)
@@ -229,3 +286,9 @@ class PoolScene(QGraphicsScene):
     def _normalize_column_orders(self):
         for order, col in enumerate(self._ordered_columns()):
             col._display_order = order
+            self._saved_order_by_street[col.street] = order
+
+    def _next_display_order(self) -> int:
+        if not self._column_items:
+            return 0
+        return max(int(getattr(col, "_display_order", 0)) for col in self._column_items) + 1

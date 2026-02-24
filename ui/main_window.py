@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt, Slot, QTimer, QRectF
 from PySide6.QtGui import QAction, QColor, QFont, QPageLayout, QPageSize, QPainter, QPdfWriter, QPen
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QToolBar, QLabel, QSpinBox, QComboBox, QPushButton,
+    QLabel, QSpinBox, QComboBox, QPushButton, QToolButton,
     QScrollArea, QFileDialog, QMessageBox, QInputDialog, QDialog,
     QGroupBox, QScrollBar, QSizePolicy, QFormLayout, QDialogButtonBox, QLineEdit,
 )
@@ -29,6 +29,7 @@ from domain.constants import (
     VISIT_WIDTH, COLUMN_SPACING,
     COLOR_HEADER_BG, COLOR_ROUTE_COLUMN_BG, COLOR_VISIT_BG, COLOR_VISIT_BORDER,
     COLOR_TRAVEL_BG, COLOR_TRAVEL_BORDER, COLOR_EMPTY_BG, COLOR_EMPTY_BORDER,
+    COLOR_TRAVEL_DEFAULT_BG, COLOR_TRAVEL_DEFAULT_BORDER,
 )
 from services.persistence_service import PersistenceService
 from services.excel_import_service import ExcelImportService
@@ -124,6 +125,7 @@ class MainWindow(QMainWindow):
         self._failed_fallback_keys: set[tuple[str, str, str]] = set()
         self._map_window: Optional[VisitMapWindow] = None
         self._selected_visit_id: Optional[int] = None
+        self._global_search_query: str = ""
 
         # Paired visit index: visit_id → partner_visit_id
         self._pairs: dict[int, int] = {}
@@ -150,6 +152,7 @@ class MainWindow(QMainWindow):
             "_on_add_route",
             "_on_route_renamed",
             "_on_route_notes_changed",
+            "_on_route_color_changed",
             "_on_route_delete",
             "_on_entry_dropped",
             "_on_entry_returned",
@@ -384,7 +387,7 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(4)
 
         # Toolbar
-        self._build_toolbar()
+        self._build_toolbar(root_layout)
 
         # Filter bar – wraps to multiple rows as needed
         self._filter_bar = QWidget()
@@ -396,16 +399,13 @@ class MainWindow(QMainWindow):
         filter_bar_vbox.setSpacing(2)
 
         filter_label_row = QHBoxLayout()
-        self._filter_label = QLabel("Filter (Insatser):")
+        self._filter_label = QLabel("Insatser:")
         filter_label_row.addWidget(self._filter_label)
         self._filter_mode_combo = QComboBox()
         self._filter_mode_combo.addItem("OR", "or")
         self._filter_mode_combo.addItem("AND", "and")
         self._filter_mode_combo.currentIndexChanged.connect(self._on_filter_changed)
-        filter_label_row.addWidget(QLabel("Kombination:"))
         filter_label_row.addWidget(self._filter_mode_combo)
-        filter_label_row.addStretch()
-        filter_bar_vbox.addLayout(filter_label_row)
 
         self._filter_cb_container = QWidget()
         self._filter_cb_container.setSizePolicy(
@@ -413,13 +413,28 @@ class MainWindow(QMainWindow):
         )
         self._filter_layout = FlowLayout(self._filter_cb_container, h_spacing=6, v_spacing=4)
         self._filter_layout.setContentsMargins(0, 0, 0, 0)
-        filter_bar_vbox.addWidget(self._filter_cb_container)
+        filter_label_row.addWidget(self._filter_cb_container, 1)
+        filter_bar_vbox.addLayout(filter_label_row)
 
         self._filter_buttons: dict[str, QPushButton] = {}
         root_layout.addWidget(self._filter_bar, 0)
 
         # Main splitter
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setObjectName("mainSplitter")
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(10)
+        self._splitter.setStyleSheet(
+            """
+            QSplitter#mainSplitter::handle {
+                background: #A8AFB7;
+            }
+            QSplitter#mainSplitter::handle:hover {
+                background: #6EA1D4;
+            }
+            """
+        )
+        self._splitter_start_centered = False
 
         # Left: routes
         self._route_scene = RouteScene(self._layout_engine)
@@ -446,124 +461,207 @@ class MainWindow(QMainWindow):
         self._wire_route_scene()
         self._wire_pool_scene()
 
-    def _build_toolbar(self):
-        tb = QToolBar("Huvudverktygsfält")
-        tb.setMovable(False)
-        self.addToolBar(tb)
+    def _build_toolbar(self, parent_layout: QVBoxLayout):
+        self._command_bar = QWidget(self)
+        self._command_bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self._command_flow = FlowLayout(self._command_bar, h_spacing=6, v_spacing=4)
+        self._command_flow.setContentsMargins(4, 2, 4, 2)
+        self._command_bar.setStyleSheet(
+            """
+            QToolButton {
+                min-height: 28px;
+                padding: 4px 10px;
+                border: 1px solid #B8BEC5;
+                border-radius: 6px;
+                background: #F7F8FA;
+            }
+            QToolButton:hover {
+                background: #EFF3F8;
+                border-color: #A8AFB7;
+            }
+            QToolButton:pressed {
+                background: #E5EBF2;
+            }
+            QToolButton:checked {
+                background: #DCEAF7;
+                border-color: #8DAFD2;
+            }
+            """
+        )
+        parent_layout.addWidget(self._command_bar, 0)
+
+        def _add_action_button(action: QAction):
+            btn = QToolButton(self._command_bar)
+            btn.setDefaultAction(action)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            self._command_flow.addWidget(btn)
 
         # Planfil
         act_import_state = QAction("Öppna planering", self)
         act_import_state.triggered.connect(self._on_import_state)
-        tb.addAction(act_import_state)
+        _add_action_button(act_import_state)
 
         act_export_state = QAction("Spara planering", self)
         act_export_state.triggered.connect(self._on_export_state)
-        tb.addAction(act_export_state)
+        _add_action_button(act_export_state)
 
-        tb.addSeparator()
-
-        # Inläsning (källdata)
         act_import = QAction("Importera Excel", self)
         act_import.triggered.connect(self._on_import_excel)
-        tb.addAction(act_import)
+        _add_action_button(act_import)
 
-        tb.addSeparator()
-
-        # Export (resultat)
         act_export_excel = QAction("Exportera Excel", self)
         act_export_excel.triggered.connect(self._on_export_excel)
-        tb.addAction(act_export_excel)
+        _add_action_button(act_export_excel)
 
         act_export_pdf = QAction("Exportera PDF", self)
         act_export_pdf.triggered.connect(self._on_export_pdf)
-        tb.addAction(act_export_pdf)
-
-        tb.addSeparator()
+        _add_action_button(act_export_pdf)
 
         # Planering
         act_add_route = QAction("＋ Ny rutt", self)
         act_add_route.triggered.connect(self._on_add_route)
-        tb.addAction(act_add_route)
+        _add_action_button(act_add_route)
 
         act_integrity = QAction("Tidsintegritet", self)
         act_integrity.triggered.connect(self._on_time_integrity)
-        tb.addAction(act_integrity)
-
-        tb.addSeparator()
+        _add_action_button(act_integrity)
 
         # Visning
         self._show_travel_action = QAction("Restid", self)
         self._show_travel_action.setCheckable(True)
         self._show_travel_action.setChecked(bool(self._settings.show_travel_blocks))
         self._show_travel_action.toggled.connect(self._on_block_visibility_changed)
-        tb.addAction(self._show_travel_action)
+        _add_action_button(self._show_travel_action)
 
         self._show_space_action = QAction("Lucka", self)
         self._show_space_action.setCheckable(True)
         self._show_space_action.setChecked(bool(self._settings.show_space_blocks))
         self._show_space_action.toggled.connect(self._on_block_visibility_changed)
-        tb.addAction(self._show_space_action)
+        _add_action_button(self._show_space_action)
 
         self._show_extra_time_action = QAction("Extratid", self)
         self._show_extra_time_action.setCheckable(True)
         self._show_extra_time_action.setChecked(bool(self._settings.show_extra_time_blocks))
         self._show_extra_time_action.toggled.connect(self._on_block_visibility_changed)
-        tb.addAction(self._show_extra_time_action)
+        _add_action_button(self._show_extra_time_action)
 
-        tb.addSeparator()
+        # Sök
+        self._search_toolbar_container = QWidget(self._command_bar)
+        self._search_toolbar_container.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        search_row = QHBoxLayout(self._search_toolbar_container)
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(4)
+        self._search_label = QLabel("Sök:")
+        search_row.addWidget(self._search_label)
+        self._global_search_edit = QLineEdit()
+        self._global_search_edit.setPlaceholderText("Namn eller adress")
+        self._global_search_edit.setClearButtonEnabled(False)
+        self._global_search_edit.setFixedHeight(30)
+        self._global_search_edit.textChanged.connect(self._on_global_search_changed)
+        self._global_search_edit.setMinimumWidth(130)
+        self._global_search_edit.setMaximumWidth(170)
+        search_row.addWidget(self._global_search_edit)
+
+        self._global_search_clear_btn = QPushButton("Rensa")
+        self._global_search_clear_btn.clicked.connect(self._on_clear_global_search)
+        search_row.addWidget(self._global_search_clear_btn)
+        self._search_toolbar_container.setMaximumWidth(280)
+        self._command_flow.addWidget(self._search_toolbar_container)
 
         # Tidsinställningar
-        tb.addWidget(QLabel(" Färdsätt: "))
+        self._mode_toolbar_container = QWidget(self._command_bar)
+        self._mode_toolbar_container.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        mode_row = QHBoxLayout(self._mode_toolbar_container)
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(4)
+        self._mode_label = QLabel("Färdsätt:")
+        mode_row.addWidget(self._mode_label)
         self._mode_combo = QComboBox()
         for mode, label in [(TravelMode.CAR, "Bil"),
                              (TravelMode.BIKE, "Cykel"),
-                             (TravelMode.WALK, "Gång")]:
+                             (TravelMode.WALK, "Gå")]:
             self._mode_combo.addItem(label, mode)
         idx = self._mode_combo.findData(self._settings.default_travel_mode)
         if idx >= 0:
             self._mode_combo.setCurrentIndex(idx)
         self._mode_combo.currentIndexChanged.connect(self._on_default_mode_changed)
-        tb.addWidget(self._mode_combo)
+        mode_row.addWidget(self._mode_combo)
+        self._mode_toolbar_container.setMaximumWidth(230)
+        self._command_flow.addWidget(self._mode_toolbar_container)
 
         self._extra_time_auto_action = QAction("Auto extratid", self)
         self._extra_time_auto_action.setCheckable(True)
         self._extra_time_auto_action.setChecked(bool(self._settings.extra_time_auto_place))
         self._extra_time_auto_action.toggled.connect(self._on_extra_time_auto_toggled)
-        tb.addAction(self._extra_time_auto_action)
+        _add_action_button(self._extra_time_auto_action)
 
-        tb.addWidget(QLabel(" Extratid: "))
+        self._extra_time_toolbar_container = QWidget(self._command_bar)
+        self._extra_time_toolbar_container.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        extra_row = QHBoxLayout(self._extra_time_toolbar_container)
+        extra_row.setContentsMargins(0, 0, 0, 0)
+        extra_row.setSpacing(4)
+        self._extra_time_label = QLabel("Extratid:")
+        extra_row.addWidget(self._extra_time_label)
         self._extra_time_spin = QSpinBox()
         self._extra_time_spin.setRange(0, 120)
         self._extra_time_spin.setSuffix(" min")
+        self._extra_time_spin.setMinimumWidth(86)
+        self._extra_time_spin.setMaximumWidth(96)
         self._extra_time_spin.setValue(max(0, int(self._settings.extra_time_minutes)))
         self._extra_time_spin.valueChanged.connect(self._on_extra_time_minutes_changed)
-        tb.addWidget(self._extra_time_spin)
-
-        tb.addSeparator()
+        extra_row.addWidget(self._extra_time_spin)
+        self._extra_time_toolbar_container.setMaximumWidth(210)
+        self._command_flow.addWidget(self._extra_time_toolbar_container)
 
         # System
         act_travel_log = QAction("API-logg", self)
         act_travel_log.triggered.connect(self._show_travel_status)
-        tb.addAction(act_travel_log)
+        _add_action_button(act_travel_log)
 
         act_settings = QAction("Inställningar", self)
         act_settings.triggered.connect(self._on_open_settings)
-        tb.addAction(act_settings)
+        _add_action_button(act_settings)
 
         act_map = QAction("Karta", self)
         act_map.triggered.connect(self._on_open_map)
-        tb.addAction(act_map)
-
-        tb.addSeparator()
+        _add_action_button(act_map)
 
         act_reset_all = QAction("Rensa allt", self)
         act_reset_all.triggered.connect(self._on_reset_all)
-        tb.addAction(act_reset_all)
+        _add_action_button(act_reset_all)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._splitter_start_centered:
+            return
+        self._splitter_start_centered = True
+        QTimer.singleShot(0, self._center_main_splitter)
+
+    def _center_main_splitter(self):
+        sizes = self._splitter.sizes()
+        if len(sizes) < 2:
+            return
+        total = sizes[0] + sizes[1]
+        if total <= 1:
+            return
+        left = max(1, total // 2)
+        right = max(1, total - left)
+        self._splitter.setSizes([left, right])
 
     def _wire_route_scene(self):
         s = self._route_scene
+        s.column_reorder_requested.connect(self._on_route_column_reordered)
         s.route_renamed.connect(self._on_route_renamed)
         s.route_notes_changed.connect(self._on_route_notes_changed)
+        s.route_color_changed.connect(self._on_route_color_changed)
         s.route_delete_requested.connect(self._on_route_delete)
         s.entry_dropped.connect(self._on_entry_dropped)
         s.entry_moved.connect(self._on_entry_moved)
@@ -579,10 +677,15 @@ class MainWindow(QMainWindow):
         s.travel_retry.connect(self._on_travel_retry)
         s.travel_source_toggle.connect(self._on_travel_source_toggle)
         s.visit_selected.connect(self._on_route_visit_selected)
+        s.entry_pair_requested.connect(self._on_route_entry_pair_requested)
+        s.entry_unpair_requested.connect(self._on_route_entry_unpair_requested)
 
     def _wire_pool_scene(self):
+        self._pool_scene.column_order_changed.connect(self._on_pool_column_order_changed)
         self._pool_scene.entry_returned_to_pool.connect(self._on_entry_returned)
         self._pool_scene.visit_selected.connect(self._on_pool_visit_selected)
+        self._pool_scene.visit_pair_requested.connect(self._on_pool_visit_pair_requested)
+        self._pool_scene.visit_unpair_requested.connect(self._on_pool_visit_unpair_requested)
 
     # ------------------------------------------------------------------
     # Data loading
@@ -611,16 +714,19 @@ class MainWindow(QMainWindow):
 
         self._compute_pairs()
         self._build_filter_bar()
+        pool_order = self._db.load_column_order("pool_street")
 
         # Pool: visits NOT placed in any route
         placed = self._db.get_placed_visit_ids()
         pool_visits = [v for v in visits if v.id not in placed]
 
         self._pool_scene.load(self._default_templates, pool_visits)
+        self._pool_scene.set_column_order_map(pool_order)
         self._route_scene.load_routes(routes)
         self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._on_block_visibility_changed()
+        self._apply_filters_and_search()
         self._sync_map_window_visits()
         self._sync_map_selection()
 
@@ -690,16 +796,38 @@ class MainWindow(QMainWindow):
             for i in range(len(group)):
                 for j in range(i + 1, len(group)):
                     a, b = group[i], group[j]
-                    a_ins = (a.insatser or "").upper()
-                    b_ins = (b.insatser or "").upper()
-                    a_is_1 = "DUBBELBEMANNING 1" in a_ins
-                    a_is_2 = "DUBBELBEMANNING 2" in a_ins
-                    b_is_1 = "DUBBELBEMANNING 1" in b_ins
-                    b_is_2 = "DUBBELBEMANNING 2" in b_ins
-                    valid_roles = (a_is_1 and b_is_2) or (a_is_2 and b_is_1)
-                    if valid_roles and abs(_t2m(a.default_start) - _t2m(b.default_start)) <= 5:
+                    if self._is_recommended_pair_candidate(a, b):
                         self._pairs[a.id] = b.id
                         self._pairs[b.id] = a.id
+
+        self._sync_visit_pair_state()
+
+    def _sync_visit_pair_state(self):
+        for visit in self._visits.values():
+            visit.pair_partner_id = self._pairs.get(visit.id)
+
+    def _is_recommended_pair_candidate(self, visit_a: Visit, visit_b: Visit) -> bool:
+        """True when two visits match the auto-discovery pairing rule."""
+        if not visit_a or not visit_b:
+            return False
+        name_a = (visit_a.name or "").strip().lower()
+        name_b = (visit_b.name or "").strip().lower()
+        addr_a = (visit_a.address or "").strip().lower()
+        addr_b = (visit_b.address or "").strip().lower()
+        if not name_a or not addr_a or name_a != name_b or addr_a != addr_b:
+            return False
+
+        a_ins = (visit_a.insatser or "").upper()
+        b_ins = (visit_b.insatser or "").upper()
+        a_is_1 = "DUBBELBEMANNING 1" in a_ins
+        a_is_2 = "DUBBELBEMANNING 2" in a_ins
+        b_is_1 = "DUBBELBEMANNING 1" in b_ins
+        b_is_2 = "DUBBELBEMANNING 2" in b_ins
+        valid_roles = (a_is_1 and b_is_2) or (a_is_2 and b_is_1)
+        if not valid_roles:
+            return False
+
+        return abs(_t2m(visit_a.default_start) - _t2m(visit_b.default_start)) <= 5
 
     def _build_filter_bar(self):
         # Clear existing buttons (hide first to avoid flash)
@@ -735,10 +863,34 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_filter_changed(self):
+        self._apply_filters_and_search()
+
+    def _apply_filters_and_search(self):
         active = {tag for tag, btn in self._filter_buttons.items() if btn.isChecked()}
         mode = self._filter_mode_combo.currentData() or "or"
         self._route_scene.apply_filter(active, mode)
         self._pool_scene.apply_filter(active, mode)
+        self._route_scene.apply_search(self._global_search_query)
+        self._pool_scene.apply_search(self._global_search_query)
+
+    @Slot(str)
+    def _on_global_search_changed(self, text: str):
+        self._global_search_query = (text or "").strip()
+        self._apply_filters_and_search()
+
+    @Slot()
+    def _on_clear_global_search(self):
+        self._global_search_edit.clear()
+
+    @Slot(int, int)
+    def _on_route_column_reordered(self, route_id: int, direction: int):
+        for route in sorted(self._routes.values(), key=lambda r: r.display_order):
+            self._db.save_route(route)
+
+    @Slot()
+    def _on_pool_column_order_changed(self):
+        for street, order in self._pool_scene.column_order_pairs():
+            self._db.save_column_order("pool_street", street, order)
 
     # ------------------------------------------------------------------
     # Route management
@@ -775,6 +927,18 @@ class MainWindow(QMainWindow):
             route.notes = notes
             self._db.save_route(route)
 
+    @Slot(int, object)
+    def _on_route_color_changed(self, route_id: int, color):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        route.route_color = color or None
+        for entry in route.entries:
+            entry.route_color = route.route_color
+        self._db.save_route(route)
+        self._route_scene.rebuild_route(route, animate=False)
+        self._autosave.mark_dirty(route_id)
+
     @Slot(int)
     def _on_route_delete(self, route_id: int):
         route = self._routes.get(route_id)
@@ -810,9 +974,17 @@ class MainWindow(QMainWindow):
 
         dtype = data.get("type")
         insert_index = data.get("insert_index")
+        dropped_visit_id: Optional[int] = None
 
         if dtype == "pool_visit":
             visit_id = data["visit_id"]
+            if not self._can_place_paired_visit_on_route(route, visit_id):
+                QMessageBox.warning(
+                    self,
+                    "Placering blockerad",
+                    "Parade besök kan inte placeras på samma rutt.",
+                )
+                return
             visit = self._visits.get(visit_id)
             if not visit:
                 return
@@ -834,6 +1006,7 @@ class MainWindow(QMainWindow):
             self._pool_scene.remove_visit(visit_id)
             self._request_travel_for_new_entry(route, entry)
             self._route_scene.rebuild_route(route)
+            dropped_visit_id = entry.visit_id
             if insert_index is not None:
                 self._route_scene.pop_visit(route_id, visit_index=int(insert_index))
 
@@ -897,6 +1070,14 @@ class MainWindow(QMainWindow):
                 self._recalc.recalculate(route)
                 self._route_scene.rebuild_route(route)
                 self._route_scene.pop_visit(route_id, visit_index=adjusted_index)
+                dropped_visit_id = entry.visit_id
+                if dropped_visit_id:
+                    changed_route_ids = self._synchronize_all_pairs(max_passes=2)
+                    for changed_route_id in changed_route_ids:
+                        changed_route = self._routes.get(changed_route_id)
+                        if changed_route:
+                            self._route_scene.rebuild_route(changed_route)
+                            self._autosave.mark_dirty(changed_route_id)
                 self._autosave.mark_dirty(route.id)
                 return
             src_route = self._routes.get(src_route_id)
@@ -904,6 +1085,13 @@ class MainWindow(QMainWindow):
                 return
             entry = next((e for e in src_route.entries if e.id == entry_id), None)
             if not entry:
+                return
+            if entry.visit_id and not self._can_place_paired_visit_on_route(route, entry.visit_id):
+                QMessageBox.warning(
+                    self,
+                    "Placering blockerad",
+                    "Parade besök kan inte placeras på samma rutt.",
+                )
                 return
             # Remove from source
             self._recalc.remove_entry_from_route(src_route, entry, replace_with_empty=False)
@@ -915,12 +1103,22 @@ class MainWindow(QMainWindow):
                 self._settings.default_travel_mode,
                 insert_index=insert_index,
             )
+            self._request_travel_for_new_entry(route, entry)
             if self._settings.extra_time_auto_place and entry.visit_id and not entry.is_office_instance:
                 self._ensure_extra_time_for_entry(route, entry.id)
             self._route_scene.rebuild_route(src_route)
             self._route_scene.rebuild_route(route)
+            dropped_visit_id = entry.visit_id
             if insert_index is not None:
                 self._route_scene.pop_visit(route_id, visit_index=int(insert_index))
+
+        if dropped_visit_id:
+            changed_route_ids = self._synchronize_all_pairs(max_passes=2)
+            for changed_route_id in changed_route_ids:
+                changed_route = self._routes.get(changed_route_id)
+                if changed_route:
+                    self._route_scene.rebuild_route(changed_route)
+                    self._autosave.mark_dirty(changed_route_id)
 
         self._autosave.mark_dirty(route.id)
 
@@ -944,6 +1142,7 @@ class MainWindow(QMainWindow):
             default_start=v.default_start, default_end=v.default_end,
             insatser=v.insatser, color=v.color, raw_data=v.raw_data,
             full_address=v.full_address,
+            pair_partner_id=self._pairs.get(v.id),
         )
         self._recalc.remove_entry_from_route(route, entry, replace_with_empty=True)
         self._pool_scene.add_visit(v_restored)
@@ -981,6 +1180,7 @@ class MainWindow(QMainWindow):
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route.id)
+        self._apply_pair_synchronization_and_refresh(max_passes=6)
 
     @Slot(int, int, object)
     def _on_entry_color_changed(self, route_id: int, entry_id: int, color):
@@ -1150,6 +1350,7 @@ class MainWindow(QMainWindow):
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route.id)
+        self._apply_pair_synchronization_and_refresh(max_passes=6)
 
     @Slot(int, int, int)
     def _on_entry_duration_changed(self, route_id: int, entry_id: int, delta: int):
@@ -1182,6 +1383,7 @@ class MainWindow(QMainWindow):
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route.id)
+        self._apply_pair_synchronization_and_refresh(max_passes=6)
 
     @Slot(int, int, int)
     def _on_empty_remove(self, route_id: int, from_entry_id: int, to_entry_id: int):
@@ -1213,16 +1415,40 @@ class MainWindow(QMainWindow):
         seg = next((s for s in route.travel_segments if s.id == seg_id), None)
         if not seg:
             return
+        previous_state = seg.travel_time_state
+        previous_is_custom = seg.is_custom
+        was_calculated_display = self._segment_is_calculated_display(seg)
         seg.mode = mode
         seg.api_failed = False
         seg.api_error = ""
         seg.is_calculating = False
-        seg.travel_time_state = TravelTimeState.DEFAULT
+
+        if previous_state == TravelTimeState.DEFAULT and not previous_is_custom:
+            self._apply_segment_minutes(
+                route,
+                seg,
+                self._settings.default_travel_for_mode(mode),
+                is_custom=False,
+                state=TravelTimeState.DEFAULT,
+            )
+            self._apply_pair_synchronization_and_refresh(max_passes=6)
+            return
+
+        if previous_state == TravelTimeState.CALCULATED and not previous_is_custom:
+            seg.travel_time_state = TravelTimeState.CALCULATED
+            self._recalc.recalculate(route)
+            self._route_scene.rebuild_route(route)
+            self._autosave.mark_dirty(route_id)
+            self._apply_pair_synchronization_and_refresh(max_passes=6)
+            self._request_segment_travel(route, seg, debounce_ms=700,
+                                         display_is_calc=was_calculated_display)
+            return
+
+        seg.travel_time_state = TravelTimeState.EDITED if previous_is_custom else previous_state
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route_id)
-
-        self._request_segment_travel(route, seg, debounce_ms=700)
+        self._apply_pair_synchronization_and_refresh(max_passes=6)
 
     @Slot(int, int, int)
     def _on_travel_duration_changed(self, route_id: int, seg_id: int, delta: int):
@@ -1264,6 +1490,7 @@ class MainWindow(QMainWindow):
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route_id)
+        self._apply_pair_synchronization_and_refresh(max_passes=6)
 
     @Slot(int, int)
     def _on_travel_minutes_edit(self, route_id: int, seg_id: int):
@@ -1311,6 +1538,7 @@ class MainWindow(QMainWindow):
             self._recalc.recalculate(route)
             self._route_scene.rebuild_route(route)
             self._autosave.mark_dirty(route_id)
+            self._apply_pair_synchronization_and_refresh(max_passes=6)
 
     @Slot(int, int)
     def _on_travel_retry(self, route_id: int, seg_id: int):
@@ -1320,7 +1548,8 @@ class MainWindow(QMainWindow):
         seg = next((s for s in route.travel_segments if s.id == seg_id), None)
         if not seg:
             return
-        self._request_segment_travel(route, seg, debounce_ms=0)
+        self._request_segment_travel(route, seg, debounce_ms=0,
+                                     display_is_calc=self._segment_is_calculated_display(seg))
 
     @Slot(int, int)
     def _on_travel_source_toggle(self, route_id: int, seg_id: int):
@@ -1345,7 +1574,8 @@ class MainWindow(QMainWindow):
                                         state=TravelTimeState.DEFAULT)
             return
 
-        self._request_segment_travel(route, seg, debounce_ms=0)
+        self._request_segment_travel(route, seg, debounce_ms=0,
+                         display_is_calc=self._segment_is_calculated_display(seg))
 
     def _apply_segment_minutes(self, route: Route, seg: TravelSegment, minutes: int,
                                is_custom: bool, state: str):
@@ -1412,6 +1642,7 @@ class MainWindow(QMainWindow):
                     seg.travel_minutes = minutes
                     seg.calculated_minutes = minutes
                     seg.is_calculating = False
+                    seg.loading_display_is_calc = None
                     if not from_failed_fallback:
                         seg.api_failed = False
                         seg.api_error = ""
@@ -1486,9 +1717,13 @@ class MainWindow(QMainWindow):
                 if (from_entry.api_address == from_addr and
                         to_entry.api_address == to_addr and
                         seg.mode == mode):
+                    if is_calculating and seg.loading_display_is_calc is None:
+                        seg.loading_display_is_calc = self._segment_is_calculated_display(seg)
                     seg.is_calculating = is_calculating
                     seg.api_failed = api_failed
                     seg.api_error = api_error
+                    if not is_calculating:
+                        seg.loading_display_is_calc = None
                     if api_failed:
                         seg.travel_time_state = TravelTimeState.DEFAULT
                     changed = True
@@ -1496,7 +1731,8 @@ class MainWindow(QMainWindow):
                 self._route_scene.rebuild_route(route)
 
     def _request_segment_travel(self, route: Route, seg: TravelSegment,
-                                debounce_ms: int = 0):
+                                debounce_ms: int = 0,
+                                display_is_calc: Optional[bool] = None):
         from_entry = next((e for e in route.entries if e.id == seg.from_entry_id), None)
         to_entry = next((e for e in route.entries if e.id == seg.to_entry_id), None)
         if not from_entry or not to_entry:
@@ -1506,6 +1742,10 @@ class MainWindow(QMainWindow):
         to_addr = to_entry.api_address
         if not from_addr or not to_addr:
             return
+
+        if display_is_calc is None:
+            display_is_calc = self._segment_is_calculated_display(seg)
+        seg.loading_display_is_calc = bool(display_is_calc)
 
         seg.is_calculating = True
         seg.api_failed = False
@@ -1530,6 +1770,13 @@ class MainWindow(QMainWindow):
             timer.start(int(debounce_ms))
         else:
             _fire_request()
+
+    def _segment_is_calculated_display(self, seg: TravelSegment) -> bool:
+        return (
+            seg.travel_time_state == TravelTimeState.CALCULATED
+            and not seg.is_custom
+            and not seg.api_failed
+        )
 
     @Slot()
     def _on_time_integrity(self):
@@ -1913,11 +2160,23 @@ class MainWindow(QMainWindow):
         # Remove default sheet so only route sheets are exported.
         wb.remove(wb.active)
 
-        header_labels = ["Start", "Slut", "Namn", "Adress", "Insatser"]
+        header_labels = ["Start", "Slut", "Namn", "Adress", "Insatser", "Färdsätt"]
+        summary_header_labels = ["Rutt", "Start", "Slut", "Namn", "Adress", "Insatser", "Färdsätt"]
         header_font = Font(bold=True, color="FFFFFF")
         header_fill = PatternFill(fill_type="solid", fgColor="4F81BD")
         odd_fill = PatternFill(fill_type="solid", fgColor="DCE6F1")
         even_fill = PatternFill(fill_type="solid", fgColor="EDF2F9")
+
+        def _mode_label(mode: Optional[str]) -> str:
+            if mode == TravelMode.CAR:
+                return "Bil"
+            if mode == TravelMode.BIKE:
+                return "Cykel"
+            if mode == TravelMode.WALK:
+                return "Gå"
+            return "-"
+
+        summary_rows: list[list[str]] = []
 
         used_sheet_names: set[str] = set()
         routes = sorted(self._routes.values(), key=lambda r: r.display_order)
@@ -1932,20 +2191,37 @@ class MainWindow(QMainWindow):
                 cell.font = header_font
                 cell.fill = header_fill
 
-            for data_idx, entry in enumerate(route.sorted_entries(), start=1):
+            entries = route.sorted_entries()
+            for data_idx, entry in enumerate(entries, start=1):
+                mode_label = "-"
+                if data_idx > 1:
+                    prev = entries[data_idx - 2]
+                    seg = route.travel_segment_between(prev.id, entry.id)
+                    mode_label = _mode_label(seg.mode if seg else None)
+
                 ws.append([
                     _display_time(entry.start_time),
                     _display_time(entry.end_time),
                     entry.display_name,
                     entry.display_address,
                     entry.display_insatser,
+                    mode_label,
+                ])
+                summary_rows.append([
+                    route.name,
+                    _display_time(entry.start_time),
+                    _display_time(entry.end_time),
+                    entry.display_name,
+                    entry.display_address,
+                    entry.display_insatser,
+                    mode_label,
                 ])
                 row_idx = data_idx + 1
                 row_fill = odd_fill if data_idx % 2 == 1 else even_fill
                 for col_idx in range(1, len(header_labels) + 1):
                     ws.cell(row=row_idx, column=col_idx).fill = row_fill
 
-            ws.auto_filter.ref = f"A1:E{max(1, ws.max_row)}"
+            ws.auto_filter.ref = f"A1:F{max(1, ws.max_row)}"
 
             for col_idx in range(1, len(header_labels) + 1):
                 max_len = 0
@@ -1963,7 +2239,31 @@ class MainWindow(QMainWindow):
                 cell = ws.cell(row=1, column=col_idx)
                 cell.font = header_font
                 cell.fill = header_fill
-            ws.auto_filter.ref = "A1:E1"
+            ws.auto_filter.ref = "A1:F1"
+
+        ws_summary = wb.create_sheet("Sammanfattning")
+        ws_summary.append(summary_header_labels)
+        for col_idx in range(1, len(summary_header_labels) + 1):
+            cell = ws_summary.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+
+        for data_idx, row_data in enumerate(summary_rows, start=1):
+            ws_summary.append(row_data)
+            row_idx = data_idx + 1
+            row_fill = odd_fill if data_idx % 2 == 1 else even_fill
+            for col_idx in range(1, len(summary_header_labels) + 1):
+                ws_summary.cell(row=row_idx, column=col_idx).fill = row_fill
+
+        ws_summary.auto_filter.ref = f"A1:G{max(1, ws_summary.max_row)}"
+        for col_idx in range(1, len(summary_header_labels) + 1):
+            max_len = 0
+            for row_idx in range(1, ws_summary.max_row + 1):
+                value = ws_summary.cell(row=row_idx, column=col_idx).value
+                text = "" if value is None else str(value)
+                if len(text) > max_len:
+                    max_len = len(text)
+            ws_summary.column_dimensions[get_column_letter(col_idx)].width = max(14, max_len + 2)
 
         wb.save(path)
 
@@ -2020,6 +2320,15 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+            def _pdf_mode_label(mode: Optional[str]) -> str:
+                if mode == TravelMode.CAR:
+                    return "Bil"
+                if mode == TravelMode.BIKE:
+                    return "Cykel"
+                if mode == TravelMode.WALK:
+                    return "Gå"
+                return "-"
+
             def draw_route_column(
                 route: Route,
                 x: int,
@@ -2068,10 +2377,10 @@ class MainWindow(QMainWindow):
                             and seg.calculated_minutes is not None
                             and not seg.api_failed
                         )
-                        travel_bg = QColor("#E8F5E9") if is_verklig else QColor(COLOR_TRAVEL_BG)
-                        travel_border = QColor("#2E7D32") if is_verklig else QColor(COLOR_TRAVEL_BORDER)
-                        travel_text = QColor("#1B5E20") if is_verklig else QColor("#5D4037")
-                        travel_value = QColor("#2E7D32") if is_verklig else QColor("#1565C0")
+                        travel_bg = QColor(COLOR_TRAVEL_BG) if is_verklig else QColor(COLOR_TRAVEL_DEFAULT_BG)
+                        travel_border = QColor(COLOR_TRAVEL_BORDER) if is_verklig else QColor(COLOR_TRAVEL_DEFAULT_BORDER)
+                        travel_text = QColor("#5D4037") if is_verklig else QColor("#424242")
+                        travel_value = QColor("#1565C0")
 
                         painter.fillRect(
                             QRectF(x + content_pad, row_y, column_w - (content_pad * 2), travel_h),
@@ -2083,7 +2392,7 @@ class MainWindow(QMainWindow):
                         mode_label = {
                             TravelMode.CAR: "Bil",
                             TravelMode.BIKE: "Cykel",
-                            TravelMode.WALK: "Gång",
+                            TravelMode.WALK: "Gå",
                         }.get(seg.mode, seg.mode)
                         if seg.is_custom:
                             source_label = "Redigerad restid"
@@ -2135,12 +2444,12 @@ class MainWindow(QMainWindow):
                     if item_type == "extra":
                         painter.fillRect(
                             QRectF(x + content_pad, row_y, column_w - (content_pad * 2), extra_h),
-                            QColor("#E8F5E9"),
+                            QColor("#BBDEFB"),
                         )
-                        painter.setPen(QPen(QColor("#2E7D32"), 1))
+                        painter.setPen(QPen(QColor("#64B5F6"), 1))
                         painter.drawRect(QRectF(x + content_pad, row_y, column_w - (content_pad * 2), extra_h))
                         painter.setFont(small_font)
-                        painter.setPen(QPen(QColor("#1B5E20")))
+                        painter.setPen(QPen(QColor("#0D47A1")))
                         painter.drawText(
                             QRectF(x + content_pad + 8, row_y, column_w - (content_pad * 2) - 16, extra_h),
                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -2149,7 +2458,7 @@ class MainWindow(QMainWindow):
                         row_y += extra_h + block_gap
                         continue
 
-                    entry = item
+                    entry, incoming_mode_label = item
                     painter.fillRect(QRectF(x + content_pad, row_y, column_w - (content_pad * 2), visit_h), QColor(COLOR_VISIT_BG))
 
                     strip_color = color_map.get(entry.display_color or "", QColor("#2B2B2B"))
@@ -2184,6 +2493,11 @@ class MainWindow(QMainWindow):
                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                         entry.display_insatser,
                     )
+                    painter.drawText(
+                        QRectF(text_x, row_y + 60, text_w, 12),
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                        f"Färdsätt: {incoming_mode_label}",
+                    )
 
                     painter.setFont(body_font)
                     painter.setPen(QPen(QColor("#0D47A1")))
@@ -2213,9 +2527,9 @@ class MainWindow(QMainWindow):
             route_chunk_map: dict[int, list[list[tuple[str, object]]]] = {}
             for route in routes:
                 entries = route.sorted_entries()
-
                 route_items: list[tuple[str, object]] = []
                 for idx, entry in enumerate(entries):
+                    incoming_mode_label = "-"
                     if idx > 0:
                         prev = entries[idx - 1]
                         if self._settings.show_extra_time_blocks and route.extra_time_for_entry(entry.id):
@@ -2224,11 +2538,15 @@ class MainWindow(QMainWindow):
                             seg = route.travel_segment_between(prev.id, entry.id)
                             if seg:
                                 route_items.append(("travel", seg))
+                            incoming_mode_label = _pdf_mode_label(seg.mode if seg else None)
+                        else:
+                            seg = route.travel_segment_between(prev.id, entry.id)
+                            incoming_mode_label = _pdf_mode_label(seg.mode if seg else None)
                         if self._settings.show_space_blocks:
                             esp = route.empty_space_between(prev.id, entry.id)
                             if esp and esp.duration_minutes > 0:
                                 route_items.append(("empty", esp))
-                    route_items.append(("visit", entry))
+                    route_items.append(("visit", (entry, incoming_mode_label)))
 
                 if not route_items:
                     route_chunk_map[route.id] = [[]]
@@ -2366,6 +2684,291 @@ class MainWindow(QMainWindow):
                 for entry in route.entries:
                     if entry.visit_id == partner_id:
                         self._route_scene.highlight_pair(route.id, entry.id)
+
+    @Slot(int, int)
+    def _on_route_entry_pair_requested(self, route_id: int, entry_id: int):
+        """Handle pair request from route visit."""
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        
+        entry = next((e for e in route.entries if e.id == entry_id), None)
+        if not entry or not entry.visit_id:
+            return
+        
+        self._show_pair_dialog(entry.visit_id)
+
+    @Slot(int, int)
+    def _on_route_entry_unpair_requested(self, route_id: int, entry_id: int):
+        """Handle unpair request from route visit."""
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        
+        entry = next((e for e in route.entries if e.id == entry_id), None)
+        if not entry or not entry.visit_id:
+            return
+        
+        self._unpair_visit(entry.visit_id)
+
+    @Slot(int)
+    def _on_pool_visit_pair_requested(self, visit_id: int):
+        """Handle pair request from pool visit."""
+        self._show_pair_dialog(visit_id)
+
+    @Slot(int)
+    def _on_pool_visit_unpair_requested(self, visit_id: int):
+        """Handle unpair request from pool visit."""
+        self._unpair_visit(visit_id)
+
+    def _show_pair_dialog(self, visit_id: int):
+        """Show dialog to pair visit with another visit."""
+        visit = self._visits.get(visit_id)
+        if not visit:
+            return
+
+        sel_name = (visit.name or "").strip().lower()
+        sel_address = (visit.address or "").strip().lower()
+        available = [
+            v for v in self._visits.values()
+            if (v.id != visit_id and v.id not in self._pairs and
+                (v.name or "").strip().lower() == sel_name and
+                (v.address or "").strip().lower() == sel_address)
+        ]
+        source_route, _ = self._find_route_entry_by_visit(visit_id)
+        route_by_visit: dict[int, Optional[int]] = {}
+        current_interval_by_visit: dict[int, Optional[str]] = {}
+        recommended_visit_id: Optional[int] = None
+        for candidate in available:
+            candidate_route, _ = self._find_route_entry_by_visit(candidate.id)
+            route_by_visit[candidate.id] = candidate_route.id if candidate_route else None
+            _, candidate_entry = self._find_route_entry_by_visit(candidate.id)
+            if candidate_entry:
+                current_interval_by_visit[candidate.id] = f"{candidate_entry.start_time}–{candidate_entry.end_time}"
+            if recommended_visit_id is None and self._is_recommended_pair_candidate(visit, candidate):
+                recommended_visit_id = candidate.id
+
+        _, selected_entry = self._find_route_entry_by_visit(visit_id)
+        if selected_entry:
+            current_interval_by_visit[visit_id] = f"{selected_entry.start_time}–{selected_entry.end_time}"
+        
+        from ui.dialogs.pair_dialog import PairDialog
+        dialog = PairDialog(
+            available,
+            visit,
+            source_route_id=source_route.id if source_route else None,
+            route_by_visit=route_by_visit,
+            current_interval_by_visit=current_interval_by_visit,
+            recommended_visit_id=recommended_visit_id,
+            parent=self,
+        )
+        if dialog.exec():
+            selected_id = dialog.get_selected_visit_id()
+            if selected_id:
+                self._pair_visits(visit_id, selected_id)
+
+    def _rebuild_all_views(self):
+        pool_order = {street: order for street, order in self._pool_scene.column_order_pairs()}
+        placed: set[int] = set()
+        for route in self._routes.values():
+            for entry in route.entries:
+                if entry.visit_id:
+                    placed.add(entry.visit_id)
+
+        pool_visits = [v for v in self._visits.values() if v.id not in placed]
+        self._pool_scene.load(self._default_templates, pool_visits)
+        self._pool_scene.set_column_order_map(pool_order)
+        self._route_scene.load_routes(list(self._routes.values()))
+        self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
+        self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
+        self._on_block_visibility_changed()
+        self._apply_filters_and_search()
+        self._sync_map_window_visits()
+        self._sync_map_selection()
+        self._highlight_pair_for_visit(self._selected_visit_id)
+
+    def _pair_visits(self, visit_id_a: int, visit_id_b: int):
+        """Create a pairing between two visits."""
+        route_a, _ = self._find_route_entry_by_visit(visit_id_a)
+        route_b, _ = self._find_route_entry_by_visit(visit_id_b)
+        if route_a and route_b and route_a.id == route_b.id:
+            QMessageBox.warning(
+                self,
+                "Kan inte para",
+                "Besök på samma rutt kan inte paras.",
+            )
+            return
+        self._pairs[visit_id_a] = visit_id_b
+        self._pairs[visit_id_b] = visit_id_a
+        self._sync_visit_pair_state()
+        self._rebuild_all_views()
+
+    def _unpair_visit(self, visit_id: int):
+        """Remove pairing for a visit."""
+        partner_id = self._pairs.get(visit_id)
+        if partner_id:
+            del self._pairs[visit_id]
+            del self._pairs[partner_id]
+            self._sync_visit_pair_state()
+            self._rebuild_all_views()
+
+    def _highlight_pair_for_visit(self, visit_id: Optional[int]):
+        partner_id = self._pairs.get(visit_id) if visit_id else None
+        self._route_scene.highlight_pair(None, None)
+        self._pool_scene.highlight_pair(partner_id)
+        if partner_id:
+            # Find partner in routes
+            for route in self._routes.values():
+                for entry in route.entries:
+                    if entry.visit_id == partner_id:
+                        self._route_scene.highlight_pair(route.id, entry.id)
+        
+        # Highlight same-name-address visits
+        self._pool_scene.highlight_same_name_address(visit_id, self._visits)
+        self._route_scene.highlight_same_name_address(visit_id, self._visits)
+
+    def _find_route_entry_by_visit(self, visit_id: int) -> tuple[Optional[Route], Optional[RouteEntry]]:
+        for route in self._routes.values():
+            for entry in route.entries:
+                if entry.visit_id == visit_id:
+                    return route, entry
+        return None, None
+
+    def _route_contains_visit(self, route: Route, visit_id: int) -> bool:
+        return any(entry.visit_id == visit_id for entry in route.entries)
+
+    def _can_place_paired_visit_on_route(self, route: Route, visit_id: int) -> bool:
+        partner_id = self._pairs.get(visit_id)
+        if not partner_id:
+            return True
+        return not self._route_contains_visit(route, partner_id)
+
+    def _pair_earliest_start(self, route: Route, entry: RouteEntry) -> int:
+        entries = route.sorted_entries()
+        idx = next((i for i, e in enumerate(entries) if e.id == entry.id), None)
+        if idx is None or idx == 0:
+            return 0
+        prev = entries[idx - 1]
+        seg = route.travel_segment_between(prev.id, entry.id)
+        travel = max(0, seg.travel_minutes) if seg else 0
+        extra = self._settings.extra_time_minutes if route.extra_time_for_entry(entry.id) else 0
+        return _t2m(prev.end_time) + travel + extra
+
+    def _set_entry_start_with_gap(self, route: Route, entry: RouteEntry, target_start: int) -> bool:
+        entries = route.sorted_entries()
+        idx = next((i for i, e in enumerate(entries) if e.id == entry.id), None)
+        if idx is None:
+            return False
+
+        duration = max(1, _t2m(entry.end_time) - _t2m(entry.start_time))
+        current_start = _t2m(entry.start_time)
+
+        if idx == 0:
+            new_start = max(0, int(target_start))
+            if new_start == current_start:
+                return False
+            entry.start_time = _m2t(new_start)
+            entry.end_time = _m2t(new_start + duration)
+            self._recalc.recalculate(route)
+            return True
+
+        prev = entries[idx - 1]
+        base_start = self._pair_earliest_start(route, entry)
+        new_start = max(base_start, int(target_start))
+        gap = max(0, new_start - base_start)
+
+        space = route.empty_space_between(prev.id, entry.id)
+        old_gap = max(0, space.duration_minutes) if space else 0
+        if new_start == current_start and old_gap == gap:
+            return False
+
+        if gap > 0:
+            if space is None:
+                route.empty_spaces.append(EmptySpace(
+                    id=None,
+                    route_id=route.id,
+                    from_entry_id=prev.id,
+                    to_entry_id=entry.id,
+                    duration_minutes=gap,
+                ))
+            else:
+                space.duration_minutes = gap
+        elif space is not None:
+            route.empty_spaces.remove(space)
+
+        entry.start_time = _m2t(new_start)
+        entry.end_time = _m2t(new_start + duration)
+        self._recalc.recalculate(route)
+        return True
+
+    def _synchronize_pair_for_visit(self, visit_id: int) -> set[int]:
+        partner_id = self._pairs.get(visit_id)
+        if not partner_id:
+            return set()
+
+        route_a, entry_a = self._find_route_entry_by_visit(visit_id)
+        route_b, entry_b = self._find_route_entry_by_visit(partner_id)
+        if not route_a or not entry_a or not route_b or not entry_b:
+            return set()
+
+        start_a = _t2m(entry_a.start_time)
+        start_b = _t2m(entry_b.start_time)
+        if start_a == start_b:
+            return set()
+
+        if start_a < start_b:
+            early_route, early_entry, early_start = route_a, entry_a, start_a
+            late_route, late_entry, late_start = route_b, entry_b, start_b
+        else:
+            early_route, early_entry, early_start = route_b, entry_b, start_b
+            late_route, late_entry, late_start = route_a, entry_a, start_a
+
+        changed_routes: set[int] = set()
+
+        late_earliest = self._pair_earliest_start(late_route, late_entry)
+        if early_start >= late_earliest:
+            if self._set_entry_start_with_gap(late_route, late_entry, early_start):
+                changed_routes.add(late_route.id)
+        else:
+            if self._set_entry_start_with_gap(early_route, early_entry, late_start):
+                changed_routes.add(early_route.id)
+
+        return changed_routes
+
+    def _pair_start_snapshot(self) -> tuple[tuple[int, int, int, int], ...]:
+        rows: list[tuple[int, int, int, int]] = []
+        for visit_id, partner_id in self._pairs.items():
+            if visit_id >= partner_id:
+                continue
+            route_a, entry_a = self._find_route_entry_by_visit(visit_id)
+            route_b, entry_b = self._find_route_entry_by_visit(partner_id)
+            if not route_a or not entry_a or not route_b or not entry_b:
+                continue
+            rows.append((visit_id, partner_id, _t2m(entry_a.start_time), _t2m(entry_b.start_time)))
+        return tuple(sorted(rows))
+
+    def _synchronize_all_pairs(self, max_passes: int = 6) -> set[int]:
+        changed_routes: set[int] = set()
+        pair_roots = [visit_id for visit_id, partner_id in self._pairs.items() if visit_id < partner_id]
+        prev_snapshot = self._pair_start_snapshot()
+        for _ in range(max(1, int(max_passes))):
+            changed_this_pass: set[int] = set()
+            for visit_id in pair_roots:
+                changed_this_pass.update(self._synchronize_pair_for_visit(visit_id))
+            changed_routes.update(changed_this_pass)
+            current_snapshot = self._pair_start_snapshot()
+            if not changed_this_pass or current_snapshot == prev_snapshot:
+                break
+            prev_snapshot = current_snapshot
+        return changed_routes
+
+    def _apply_pair_synchronization_and_refresh(self, max_passes: int = 6):
+        changed_route_ids = self._synchronize_all_pairs(max_passes=max_passes)
+        for changed_route_id in changed_route_ids:
+            changed_route = self._routes.get(changed_route_id)
+            if changed_route:
+                self._route_scene.rebuild_route(changed_route)
+                self._autosave.mark_dirty(changed_route_id)
 
     # ------------------------------------------------------------------
     # Close event

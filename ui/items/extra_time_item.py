@@ -1,4 +1,4 @@
-"""ExtraTimeItem – green extra-time block inserted before a visit."""
+"""ExtraTimeItem – blue extra-time block inserted before a visit."""
 
 from __future__ import annotations
 
@@ -10,10 +10,12 @@ from domain.models import ExtraTimeBlock
 from domain.constants import VISIT_WIDTH, EMPTY_HEIGHT
 
 _PAD = 6
+_REMOVE_W = 22
+_REMOVE_H_FACTOR = 0.42
 
 
 class ExtraTimeItem(QGraphicsObject):
-    """Green block showing global extra-time minutes for one target entry."""
+    """Blue block showing global extra-time minutes for one target entry."""
 
     remove_requested = Signal(object)
 
@@ -57,21 +59,23 @@ class ExtraTimeItem(QGraphicsObject):
         w, h = self.width(), self.height()
         fs = self._font_size
 
-        painter.fillRect(0, 0, w, h, QColor("#E8F5E9"))
-        painter.setPen(QPen(QColor("#2E7D32"), 1))
+        painter.fillRect(0, 0, w, h, QColor("#BBDEFB"))
+        painter.setPen(QPen(QColor("#64B5F6"), 1))
         painter.drawRect(1, 1, w - 2, h - 2)
 
-        painter.setFont(QFont("Segoe UI", max(fs - 3, 7)))
-        painter.setPen(QColor("#1B5E20"))
+        painter.setFont(QFont("Segoe UI", max(fs - 3, 7), QFont.Weight.Bold))
+        painter.setPen(QColor("#0D47A1"))
         label = f"Extratid: {self._duration_minutes} min"
         painter.drawText(QRectF(_PAD, 0, w - 44, h),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          label)
 
-        remove_rect = QRectF(w - 34, 4, 28, h - 8)
-        painter.setPen(QPen(QColor("#1B5E20"), 1))
+        remove_h = h * _REMOVE_H_FACTOR
+        remove_y = (h - remove_h) / 2
+        remove_rect = QRectF(w - _PAD - _REMOVE_W, remove_y, _REMOVE_W, remove_h)
+        painter.setPen(QPen(QColor("#0D47A1"), 1))
         painter.drawRoundedRect(remove_rect, 3, 3)
-        painter.setFont(QFont("Segoe UI", max(fs - 2, 8), QFont.Weight.Bold))
+        painter.setFont(QFont("Segoe UI", max(fs - 4, 6), QFont.Weight.Bold))
         painter.drawText(remove_rect, Qt.AlignmentFlag.AlignCenter, "✕")
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
@@ -81,7 +85,9 @@ class ExtraTimeItem(QGraphicsObject):
         if event.button() == Qt.MouseButton.LeftButton:
             w, h = self.width(), self.height()
             pos = event.pos()
-            remove_rect = QRectF(w - 34, 4, 28, h - 8)
+            remove_h = h * _REMOVE_H_FACTOR
+            remove_y = (h - remove_h) / 2
+            remove_rect = QRectF(w - _PAD - _REMOVE_W, remove_y, _REMOVE_W, remove_h)
             if remove_rect.contains(pos):
                 self.remove_requested.emit(self)
                 event.accept()
