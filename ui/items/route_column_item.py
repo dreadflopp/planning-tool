@@ -12,6 +12,8 @@ from domain.models import Route, RouteEntry, TravelSegment, EmptySpace
 from domain.constants import (
     VISIT_WIDTH, HEADER_HEIGHT, COLUMN_SPACING,
     COLOR_ROUTE_COLUMN_BG, COLOR_HEADER_BG,
+    COLOR_VISIT_GREEN, COLOR_VISIT_PINK, COLOR_VISIT_BLUE,
+    COLOR_VISIT_RED, COLOR_VISIT_ORANGE, COLOR_VISIT_YELLOW, COLOR_VISIT_BLACK,
 )
 from ui.items.visit_item import VisitItem
 from ui.items.travel_item import TravelItem
@@ -25,6 +27,26 @@ _BTN_W = 26
 _BTN_H = 22
 _PAD = 6
 _TOP_ROW_H = _BTN_H + _PAD * 2
+_TITLE_ROW_BASE_H = 24
+_ROUTE_COLOR_HEX = {
+    "green": COLOR_VISIT_GREEN,
+    "pink": COLOR_VISIT_PINK,
+    "blue": COLOR_VISIT_BLUE,
+    "red": COLOR_VISIT_RED,
+    "orange": COLOR_VISIT_ORANGE,
+    "yellow": COLOR_VISIT_YELLOW,
+    "black": COLOR_VISIT_BLACK,
+}
+_ROUTE_COLOR_OPTIONS = [
+    ("Standard", None),
+    ("Grön", "green"),
+    ("Rosa", "pink"),
+    ("Blå", "blue"),
+    ("Röd", "red"),
+    ("Orange", "orange"),
+    ("Gul", "yellow"),
+    ("Svart", "black"),
+]
 
 
 class RouteColumnItem(QGraphicsObject):
@@ -35,9 +57,12 @@ class RouteColumnItem(QGraphicsObject):
 
     move_left_requested = Signal(object)    # emits self
     move_right_requested = Signal(object)
+    move_start_requested = Signal(object)
+    move_end_requested = Signal(object)
     rename_requested = Signal(object)
     notes_requested = Signal(object)
     delete_requested = Signal(object)
+    route_color_requested = Signal(object, object)  # (column_item, color|None)
 
     # Forwarded from children
     entry_move_up = Signal(object, object)       # (column_item, visit_item)
@@ -47,6 +72,8 @@ class RouteColumnItem(QGraphicsObject):
     entry_duration_dn = Signal(object, object)
     entry_color_change = Signal(object, object, object)  # (column_item, visit_item, color)
     entry_remove = Signal(object, object)
+    entry_pair_requested = Signal(object, object)        # (column_item, visit_item)
+    entry_unpair_requested = Signal(object, object)      # (column_item, visit_item)
     travel_mode_changed = Signal(object, object) # (column_item, travel_item)
     travel_edit_minutes = Signal(object, object)
     travel_duration_up = Signal(object, object)
@@ -66,6 +93,10 @@ class RouteColumnItem(QGraphicsObject):
         self._show_space = True
         self._show_extra_time = True
         self._extra_time_minutes = 0
+        self._is_collapsed = False
+        self._active_tags: set[str] = set()
+        self._filter_mode: str = "or"
+        self._search_query: str = ""
         self._inconsistent_entry_ids: set[int] = set()
         self._inconsistent_travel_pairs: set[tuple[int, int]] = set()
         self._inconsistent_empty_pairs: set[tuple[int, int]] = set()
@@ -88,21 +119,17 @@ class RouteColumnItem(QGraphicsObject):
 
     def column_width(self) -> int:
         from controllers.route_layout_engine import _scaled
+        if self._is_collapsed:
+            return _scaled(38, self._font_size)
         return _scaled(VISIT_WIDTH, self._font_size)
 
     def header_height(self) -> int:
         from controllers.route_layout_engine import _scaled
-        fs = self._font_size
-        min_notes_h = _scaled(30, fs)
-        notes_font = QFont("Segoe UI", max(fs - 2, 8))
-        metrics = QFontMetrics(notes_font)
-        notes_text = self._route.notes.strip() if self._route.notes else "Dubbelklicka här för anteckning"
-        notes_w = max(80, self.column_width() - _PAD * 2 - 8)
-        notes_h = metrics.boundingRect(
-            0, 0, int(notes_w), 5000,
-            int(Qt.TextFlag.TextWordWrap), notes_text,
-        ).height() + 10
-        return _TOP_ROW_H + max(min_notes_h, notes_h) + _PAD
+        return _TOP_ROW_H + _scaled(_TITLE_ROW_BASE_H, self._font_size)
+
+    def _title_row_height(self) -> int:
+        from controllers.route_layout_engine import _scaled
+        return _scaled(_TITLE_ROW_BASE_H, self._font_size)
 
     def refresh_header(self):
         self.prepareGeometryChange()
@@ -110,11 +137,39 @@ class RouteColumnItem(QGraphicsObject):
         self.update()
 
     def _name_rect(self, w: float) -> QRectF:
-        return QRectF(_PAD, _PAD, w - _BTN_W * 2 - _PAD * 3, _BTN_H)
+        title_y = _TOP_ROW_H
+        return QRectF(_PAD, title_y, w - _PAD * 2, self._title_row_height())
 
     def _notes_rect(self, w: float, hh: float) -> QRectF:
-        y = _TOP_ROW_H
-        return QRectF(_PAD, y, w - _PAD * 2, hh - y - _PAD)
+        y = _TOP_ROW_H + self._title_row_height()
+        return QRectF(_PAD, y, w - _PAD * 2, 0)
+
+    def _mix_with_white(self, color: QColor, ratio: float) -> QColor:
+        ratio = max(0.0, min(1.0, float(ratio)))
+        r = int(color.red() * (1.0 - ratio) + 255 * ratio)
+        g = int(color.green() * (1.0 - ratio) + 255 * ratio)
+        b = int(color.blue() * (1.0 - ratio) + 255 * ratio)
+        return QColor(r, g, b)
+
+    def _route_tint_colors(self) -> tuple[QColor, QColor]:
+        key = self._route.route_color or ""
+        base_hex = _ROUTE_COLOR_HEX.get(key)
+        if not base_hex:
+            return QColor(COLOR_ROUTE_COLUMN_BG), QColor(COLOR_HEADER_BG)
+        base = QColor(base_hex)
+        if not base.isValid():
+            return QColor(COLOR_ROUTE_COLUMN_BG), QColor(COLOR_HEADER_BG)
+        body = self._mix_with_white(base, 0.82)
+        header = self._mix_with_white(base, 0.88)
+        return body, header
+
+    def _move_button_rects(self, w: float) -> tuple[QRectF, QRectF, QRectF, QRectF]:
+        y = _PAD
+        r_end = QRectF(w - _BTN_W - 2, y, _BTN_W, _BTN_H)
+        r_right = QRectF(r_end.x() - _BTN_W - 2, y, _BTN_W, _BTN_H)
+        r_left = QRectF(r_right.x() - _BTN_W - 2, y, _BTN_W, _BTN_H)
+        r_start = QRectF(r_left.x() - _BTN_W - 2, y, _BTN_W, _BTN_H)
+        return r_start, r_left, r_right, r_end
 
     def total_height(self) -> int:
         return self.header_height() + sum(i.height() for i in self._all_items) + _PAD * 2
@@ -151,6 +206,18 @@ class RouteColumnItem(QGraphicsObject):
         self._layout_children()
         self.update()
 
+    def toggle_collapse(self):
+        """Toggle collapsed state of this route column."""
+        self._is_collapsed = not self._is_collapsed
+        for item in self._all_items:
+            if self._is_collapsed:
+                item.hide()
+            else:
+                item.show()
+        self.prepareGeometryChange()
+        self._layout_children()
+        self.update()
+
     def set_block_visibility(self, show_travel: bool, show_space: bool, show_extra_time: bool):
         if (self._show_travel == show_travel and
                 self._show_space == show_space and
@@ -166,21 +233,52 @@ class RouteColumnItem(QGraphicsObject):
         self.rebuild(animate=False)
 
     def apply_filter(self, active_tags: set[str], mode: str = "or"):
-        """Grey out visits that do not contain any of the active_tags."""
+        """Grey out visits that do not match current filter and search query."""
+        self._active_tags = set(active_tags or set())
+        self._filter_mode = "and" if str(mode).lower() == "and" else "or"
+        self._refresh_visit_grey_states()
+
+    def apply_search(self, query: str):
+        self._search_query = (query or "").strip().lower()
+        self._refresh_visit_grey_states()
+
+    def _refresh_visit_grey_states(self):
         for vi in self._visit_items:
-            if not active_tags:
-                vi.set_greyed_out(False)
-                continue
-            entry_tags = {t.strip() for t in vi.entry.display_insatser.split(",") if t.strip()}
-            if mode == "and":
-                match = active_tags.issubset(entry_tags)
-            else:
-                match = bool(entry_tags & active_tags)
-            vi.set_greyed_out(not match)
+            tags_ok = True
+            if self._active_tags:
+                entry_tags = {t.strip() for t in vi.entry.display_insatser.split(",") if t.strip()}
+                if self._filter_mode == "and":
+                    tags_ok = self._active_tags.issubset(entry_tags)
+                else:
+                    tags_ok = bool(self._active_tags & entry_tags)
+
+            search_ok = True
+            if self._search_query:
+                name = (vi.entry.display_name or "").lower()
+                address = (vi.entry.display_address or "").lower()
+                search_ok = self._search_query in name or self._search_query in address
+
+            vi.set_greyed_out(not (tags_ok and search_ok))
+
+    def _column_has_search_match(self) -> bool:
+        if not self._search_query:
+            return False
+        for vi in self._visit_items:
+            name = (vi.entry.display_name or "").lower()
+            address = (vi.entry.display_address or "").lower()
+            if self._search_query in name or self._search_query in address:
+                return True
+        return False
 
     def highlight_pair(self, entry_id: Optional[int]):
         for vi in self._visit_items:
             vi.set_pair_highlight(vi.entry.id == entry_id)
+
+    def highlight_same_name_address(self, same_ids: set[int]):
+        """Highlight visits that match the selected visit's name and address."""
+        for vi in self._visit_items:
+            visit_id = vi.entry.visit_id
+            vi.set_same_name_address_highlight(bool(visit_id and visit_id in same_ids))
 
     def set_selected_entry(self, entry_id: Optional[int]):
         for vi in self._visit_items:
@@ -264,14 +362,39 @@ class RouteColumnItem(QGraphicsObject):
         hh = self.header_height()
         fs = self._font_size
 
-        # Column background
-        painter.fillRect(0, hh, w, h - hh, QColor(COLOR_ROUTE_COLUMN_BG))
-        # Header background
-        painter.fillRect(0, 0, w, hh, QColor(COLOR_HEADER_BG))
+        route_body_bg, route_header_bg = self._route_tint_colors()
+        # Column background (tinted by route color)
+        painter.fillRect(0, hh, w, h - hh, route_body_bg)
+        # Header background: tinted (including behind buttons)
+        painter.fillRect(0, 0, w, hh, route_header_bg)
+        title_h = self._title_row_height()
+        painter.fillRect(0, _TOP_ROW_H, w, title_h, self._mix_with_white(route_header_bg, 0.05))
+        painter.setPen(QPen(QColor("#CFD8DC"), 1))
+        painter.drawLine(0, _TOP_ROW_H, w, _TOP_ROW_H)
         painter.setPen(QPen(QColor("#B0BEC5"), 1))
         painter.drawRect(0, 0, w - 1, h - 1)
 
-        # Route name (double-click editable)
+        # Collapse/expand button (top-left)
+        collapse_btn_x = _PAD
+        collapse_btn_y = _PAD
+        collapse_btn_rect = QRectF(collapse_btn_x, collapse_btn_y, _BTN_W, _BTN_H)
+        btn_font = QFont("Segoe UI", max(fs - 3, 7))
+        painter.setFont(btn_font)
+        painter.setBrush(QBrush(QColor("#ECEFF1")))
+        painter.setPen(QPen(QColor("#90A4AE"), 1))
+        painter.drawRoundedRect(collapse_btn_rect, 3, 3)
+        painter.setPen(QColor("#546E7A"))
+        collapse_char = "▼" if self._is_collapsed else "▶"
+        painter.drawText(collapse_btn_rect, Qt.AlignmentFlag.AlignCenter, collapse_char)
+
+        if self._is_collapsed:
+            if self._column_has_search_match():
+                painter.setPen(QPen(QColor("#FF6F00"), 2))
+                painter.drawRect(1, 1, w - 2, h - 2)
+            # In collapsed mode, only show the button
+            return
+
+        # Route name (double-click editable, visible only when expanded)
         name_font = QFont("Segoe UI", fs + 1, QFont.Weight.Bold)
         painter.setFont(name_font)
         painter.setPen(QColor("#212121"))
@@ -280,35 +403,19 @@ class RouteColumnItem(QGraphicsObject):
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          self._route.name)
 
-        # Move left / move right buttons
+        # Move left / move right buttons (visible only when expanded)
         btn_y = _PAD
         btn_font = QFont("Segoe UI", max(fs - 3, 7))
         painter.setFont(btn_font)
-        r_left = QRectF(w - _BTN_W * 2 - 4, btn_y, _BTN_W, _BTN_H)
-        r_right = QRectF(w - _BTN_W - 2, btn_y, _BTN_W, _BTN_H)
-        for rect, label in [(r_left, "◀"), (r_right, "▶")]:
+        r_start, r_left, r_right, r_end = self._move_button_rects(w)
+        for rect, label in [(r_start, "≪"), (r_left, "◀"), (r_right, "▶"), (r_end, "≫")]:
+            painter.setBrush(QBrush(QColor("#ECEFF1")))
             painter.setPen(QPen(QColor("#90A4AE"), 1))
             painter.drawRoundedRect(rect, 3, 3)
             painter.setPen(QColor("#546E7A"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
-        # Notes area (double-click editable)
-        notes_rect = self._notes_rect(w, hh)
-        painter.setPen(QPen(QColor("#B0BEC5"), 1))
-        painter.setBrush(QBrush(QColor("#FFFDE7")))
-        painter.drawRoundedRect(notes_rect, 4, 4)
-        painter.setFont(QFont("Segoe UI", max(fs - 2, 8)))
-        if self._route.notes.strip():
-            painter.setPen(QColor("#37474F"))
-            notes_text = self._route.notes
-        else:
-            painter.setPen(QColor("#90A4AE"))
-            notes_text = "Dubbelklicka här för anteckning"
-        painter.drawText(
-            notes_rect.adjusted(4, 2, -4, -2),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
-            notes_text,
-        )
+        # Header is intentionally two rows: buttons row + title row.
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
         event.accept()
@@ -317,11 +424,29 @@ class RouteColumnItem(QGraphicsObject):
         pos = event.pos()
         w = self.column_width()
         hh = self.header_height()
+        
+        # Check collapse button (top-left)
+        collapse_btn_rect = QRectF(_PAD, _PAD, _BTN_W, _BTN_H)
+        if collapse_btn_rect.contains(pos):
+            self.toggle_collapse()
+            event.accept()
+            return
+        
         if pos.y() > hh:
             return super().mouseReleaseEvent(event)
 
         if event.button() == Qt.MouseButton.RightButton:
             menu = QMenu()
+            color_menu = menu.addMenu("Ruttfärg")
+            for label, color_key in _ROUTE_COLOR_OPTIONS:
+                act = color_menu.addAction(label)
+                if (self._route.route_color or None) == color_key:
+                    act.setCheckable(True)
+                    act.setChecked(True)
+                act.triggered.connect(
+                    lambda _checked=False, c=color_key: self.route_color_requested.emit(self, c)
+                )
+            menu.addSeparator()
             act_rename = menu.addAction("Byt namn")
             act_notes = menu.addAction("Redigera anteckningar")
             menu.addSeparator()
@@ -345,15 +470,23 @@ class RouteColumnItem(QGraphicsObject):
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mouseReleaseEvent(event)
 
+        if self._is_collapsed:
+            # Skip move button processing when collapsed
+            return super().mouseReleaseEvent(event)
+
         # Move buttons (top row)
-        btn_y = _PAD
-        r_left = QRectF(w - _BTN_W * 2 - 4, btn_y, _BTN_W, _BTN_H)
-        r_right = QRectF(w - _BTN_W - 2, btn_y, _BTN_W, _BTN_H)
+        r_start, r_left, r_right, r_end = self._move_button_rects(w)
+        if r_start.contains(pos):
+            self.move_start_requested.emit(self)
+            return
         if r_left.contains(pos):
             self.move_left_requested.emit(self)
             return
         if r_right.contains(pos):
             self.move_right_requested.emit(self)
+            return
+        if r_end.contains(pos):
+            self.move_end_requested.emit(self)
             return
 
         super().mouseReleaseEvent(event)
@@ -405,6 +538,7 @@ class RouteColumnItem(QGraphicsObject):
                 "visit",
                 entry.id,
                 entry.route_id,
+
                 entry.visit_id,
                 entry.is_office_instance,
                 entry.office_name,
@@ -440,6 +574,7 @@ class RouteColumnItem(QGraphicsObject):
         positioned_item_ids: set[int] = set()
         entries = self._route.sorted_entries()
         for i, entry in enumerate(entries):
+            entry.route_color = self._route.route_color
             vi = VisitItem(entry, self._font_size, in_route=True, parent=self)
             vi.set_inconsistent(bool(entry.id in self._inconsistent_entry_ids))
             self._connect_visit_item(vi)
@@ -498,6 +633,7 @@ class RouteColumnItem(QGraphicsObject):
                         if ys:
                             ei.setPos(QPointF(0, ys.pop(0)))
                             positioned_item_ids.add(id(ei))
+        self._refresh_visit_grey_states()
         return positioned_item_ids
 
     def _target_positions(self) -> dict[object, float]:
@@ -600,6 +736,8 @@ class RouteColumnItem(QGraphicsObject):
         vi.duration_down_requested.connect(lambda v: self.entry_duration_dn.emit(self, v))
         vi.color_change_requested.connect(lambda v, c: self.entry_color_change.emit(self, v, c))
         vi.remove_requested.connect(lambda v: self.entry_remove.emit(self, v))
+        vi.pair_requested.connect(lambda v: self.entry_pair_requested.emit(self, v))
+        vi.unpair_requested.connect(lambda v: self.entry_unpair_requested.emit(self, v))
         vi.selected.connect(lambda v, s=self: s.visit_selected.emit(s, v))
 
     def _connect_travel_item(self, ti: TravelItem):

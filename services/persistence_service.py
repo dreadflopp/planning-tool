@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS routes (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT    NOT NULL,
     notes        TEXT    NOT NULL DEFAULT '',
-    display_order INTEGER NOT NULL DEFAULT 0
+    display_order INTEGER NOT NULL DEFAULT 0,
+    route_color  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS route_visit_order (
@@ -188,6 +189,13 @@ class PersistenceService:
         if "travel_time_state" not in existing_seg_cols:
             self._conn.execute(
                 "ALTER TABLE travel_segments ADD COLUMN travel_time_state TEXT NOT NULL DEFAULT 'default'"
+            )
+
+        cur = self._conn.execute("PRAGMA table_info(routes)")
+        existing_routes_cols = {row[1] for row in cur.fetchall()}
+        if "route_color" not in existing_routes_cols:
+            self._conn.execute(
+                "ALTER TABLE routes ADD COLUMN route_color TEXT"
             )
 
         cur = self._conn.execute("PRAGMA table_info(extra_time_blocks)")
@@ -456,6 +464,8 @@ class PersistenceService:
         routes = [self._row_to_route(r) for r in rows]
         for route in routes:
             route.entries = self._load_entries_for_route(route.id, visits_by_id)
+            for entry in route.entries:
+                entry.route_color = route.route_color
             self._load_segments_and_spaces(route)
             route.extra_time_blocks = self._load_extra_time_blocks_for_route(route.id)
         return routes
@@ -480,6 +490,7 @@ class PersistenceService:
             name=row["name"],
             notes=row["notes"],
             display_order=row["display_order"],
+            route_color=row["route_color"] if "route_color" in row.keys() else None,
         )
 
     def _load_entries_for_route(self, route_id: int, visits_by_id: dict) -> list[RouteEntry]:
@@ -544,16 +555,16 @@ class PersistenceService:
 
     def create_route(self, name: str, display_order: int) -> Route:
         cur = self._conn.execute(
-            "INSERT INTO routes(name, notes, display_order) VALUES (?, '', ?)",
+            "INSERT INTO routes(name, notes, display_order, route_color) VALUES (?, '', ?, NULL)",
             (name, display_order),
         )
         self._conn.commit()
-        return Route(id=cur.lastrowid, name=name, display_order=display_order)
+        return Route(id=cur.lastrowid, name=name, display_order=display_order, route_color=None)
 
     def save_route(self, route: Route):
         self._conn.execute(
-            "UPDATE routes SET name=?, notes=?, display_order=? WHERE id=?",
-            (route.name, route.notes, route.display_order, route.id),
+            "UPDATE routes SET name=?, notes=?, display_order=?, route_color=? WHERE id=?",
+            (route.name, route.notes, route.display_order, route.route_color, route.id),
         )
         self._conn.commit()
 
@@ -825,8 +836,11 @@ class PersistenceService:
                 ":default_start,:default_end,:insatser,:color,:raw_data,:full_address)", row
             )
         for row in state.get("routes", []):
+            row.setdefault("route_color", None)
             self._conn.execute(
-                "INSERT INTO routes VALUES (:id,:name,:notes,:display_order)", row
+                "INSERT INTO routes(id,name,notes,display_order,route_color) "
+                "VALUES (:id,:name,:notes,:display_order,:route_color)",
+                row,
             )
         for row in state.get("route_visit_order", []):
             row.setdefault("office_color", "black")

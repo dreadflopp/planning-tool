@@ -3,17 +3,19 @@
 # Base dimensions (scaled by font_size_factor in layout engine)
 VISIT_WIDTH = 278
 VISIT_HEIGHT = 90
-TRAVEL_HEIGHT = 52
+TRAVEL_HEIGHT = 34
 EMPTY_HEIGHT = 30
 HEADER_HEIGHT = 88
 COLUMN_SPACING = 12
 OFFICE_TEMPLATE_HEIGHT = 70
 
 # Color constants
-COLOR_TRAVEL_BG = "#FFF9C4"       # soft yellow
-COLOR_TRAVEL_BORDER = "#F9A825"
-COLOR_EMPTY_BG = "#BBDEFB"        # soft blue
-COLOR_EMPTY_BORDER = "#1565C0"
+COLOR_TRAVEL_BG = "#FFF59D"       # yellow (calculated travel time, lighter)
+COLOR_TRAVEL_BORDER = "#D4B106"
+COLOR_TRAVEL_DEFAULT_BG = "#E0E0E0"   # grey (default/edited travel time)
+COLOR_TRAVEL_DEFAULT_BORDER = "#9E9E9E"
+COLOR_EMPTY_BG = "#FFFFFF"        # white (empty space)
+COLOR_EMPTY_BORDER = "#D0D0D0"
 COLOR_VISIT_BG = "#FAFAFA"
 COLOR_VISIT_BORDER = "#9E9E9E"
 COLOR_HEADER_BG = "#ECEFF1"

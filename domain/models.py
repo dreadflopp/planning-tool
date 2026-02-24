@@ -88,6 +88,7 @@ class RouteEntry:
     office_name: str = ""
     office_address: str = ""
     office_color: Optional[str] = "black"
+    route_color: Optional[str] = field(default=None, compare=False, repr=False)
     # Runtime-only
     visit: Optional[Visit] = field(default=None, compare=False, repr=False)
 
@@ -115,7 +116,9 @@ class RouteEntry:
     def display_color(self) -> Optional[str]:
         if self.is_office_instance:
             return self.office_color or "black"
-        return self.visit.color if self.visit else None
+        if self.visit and self.visit.color:
+            return self.visit.color
+        return self.route_color
 
     @property
     def api_address(self) -> str:
@@ -143,6 +146,7 @@ class TravelSegment:
     end_time: str = ""
     # Runtime-only API status (not persisted)
     is_calculating: bool = field(default=False, compare=False, repr=False)
+    loading_display_is_calc: Optional[bool] = field(default=None, compare=False, repr=False)
     api_failed: bool = field(default=False, compare=False, repr=False)
     api_error: str = field(default="", compare=False, repr=False)
     travel_time_state: str = field(default=TravelTimeState.DEFAULT, compare=False, repr=False)
@@ -175,6 +179,7 @@ class Route:
     name: str
     notes: str = ""
     display_order: int = 0
+    route_color: Optional[str] = None
     # Runtime-only collections (loaded by PersistenceService)
     entries: list[RouteEntry] = field(default_factory=list, compare=False, repr=False)
     travel_segments: list[TravelSegment] = field(default_factory=list, compare=False, repr=False)
