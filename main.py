@@ -24,6 +24,7 @@ def main():
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import Qt, QTimer
     from ui.splash_screen import SplashScreen
+    from ui.app_style import apply_app_style
 
     # High-DPI support
     QApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -33,6 +34,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Planeringsverktyg")
     app.setOrganizationName("Hemtjänst")
+    apply_app_style(app)
 
     # Configure WebEngine after app is created
     from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings

@@ -69,10 +69,12 @@ class RouteScene(QGraphicsScene):
         self._column_items.clear()
         for route in routes:
             self._add_column(route)
+        self._normalize_route_orders()
         self._reposition_columns()
 
     def add_route(self, route: Route):
         self._add_column(route)
+        self._normalize_route_orders()
         self._reposition_columns()
 
     def remove_route(self, route_id: int):
@@ -80,6 +82,7 @@ class RouteScene(QGraphicsScene):
         if item:
             self.removeItem(item)
             self._column_items.remove(item)
+        self._normalize_route_orders()
         self._reposition_columns()
 
     def rebuild_route(self, route: Route, animate: bool = True):
@@ -155,16 +158,19 @@ class RouteScene(QGraphicsScene):
 
     def move_column(self, route_id: int, direction: int):
         """direction: -1 = left, +1 = right."""
-        items = sorted(self._column_items, key=lambda c: c.route.display_order)
+        items = self._ordered_columns()
         idx = next((i for i, c in enumerate(items) if c.route.id == route_id), None)
         if idx is None:
             return
         target = idx + direction
         if target < 0 or target >= len(items):
             return
-        items[idx].route.display_order, items[target].route.display_order = (
-            items[target].route.display_order, items[idx].route.display_order,
-        )
+
+        moved = items.pop(idx)
+        items.insert(target, moved)
+        for order, col in enumerate(items):
+            col.route.display_order = order
+
         self._reposition_columns(animate=True)
 
     def pop_visit(self, route_id: int, entry_id: Optional[int] = None, visit_index: Optional[int] = None):
@@ -350,7 +356,8 @@ class RouteScene(QGraphicsScene):
             self._reposition_columns()
 
     def _reposition_columns(self, animate: bool = False):
-        items = sorted(self._column_items, key=lambda c: c.route.display_order)
+        self._normalize_route_orders()
+        items = self._ordered_columns()
         x = 0
         for col in items:
             target = QPointF(x, 0)
@@ -373,6 +380,16 @@ class RouteScene(QGraphicsScene):
 
     def _find_column(self, route_id: int) -> Optional[RouteColumnItem]:
         return next((c for c in self._column_items if c.route.id == route_id), None)
+
+    def _ordered_columns(self) -> list[RouteColumnItem]:
+        return sorted(
+            self._column_items,
+            key=lambda c: (int(c.route.display_order), int(c.route.id)),
+        )
+
+    def _normalize_route_orders(self):
+        for order, col in enumerate(self._ordered_columns()):
+            col.route.display_order = order
 
     def _show_drop_indicator(self, x: float, y: float, w: float):
         if self._drop_indicator is not None and not shiboken6.isValid(self._drop_indicator):

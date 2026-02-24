@@ -78,6 +78,8 @@ class PoolScene(QGraphicsScene):
             self.addItem(col)
             self._column_items.append(col)
 
+        self._normalize_column_orders()
+
         self._reposition()
 
     def add_visit(self, visit: Visit, animate: bool = True):
@@ -90,6 +92,7 @@ class PoolScene(QGraphicsScene):
             self._wire_column(col)
             self.addItem(col)
             self._column_items.append(col)
+            self._normalize_column_orders()
         self._reposition(animate)
 
     def remove_visit(self, visit_id: int):
@@ -101,6 +104,7 @@ class PoolScene(QGraphicsScene):
                     if not col.visits:
                         self.removeItem(col)
                         self._column_items.remove(col)
+                        self._normalize_column_orders()
                     self._reposition()
                     return
 
@@ -131,18 +135,19 @@ class PoolScene(QGraphicsScene):
             col.set_selected_visit(visit_id)
 
     def move_column(self, street: str, direction: int):
-        items = sorted(self._column_items,
-                       key=lambda c: self._get_column_order(c.street))
+        items = self._ordered_columns()
         idx = next((i for i, c in enumerate(items) if c.street == street), None)
         if idx is None:
             return
         target = idx + direction
-        if 0 <= target < len(items):
-            # Swap positions
-            items[idx]._display_order, items[target]._display_order = (
-                getattr(items[target], "_display_order", target),
-                getattr(items[idx], "_display_order", idx),
-            )
+        if target < 0 or target >= len(items):
+            return
+
+        moved = items.pop(idx)
+        items.insert(target, moved)
+        for order, col in enumerate(items):
+            col._display_order = order
+
         self._reposition(animate=True)
 
     # ------------------------------------------------------------------
@@ -196,8 +201,7 @@ class PoolScene(QGraphicsScene):
         )
         template_h = row_h + (_TEMPLATE_MARGIN if has_visible_template else 0)
 
-        items = sorted(self._column_items,
-                       key=lambda c: self._get_column_order(c.street))
+        items = self._ordered_columns()
         x = 0
         for col in items:
             target = QPointF(x, template_h)
@@ -212,6 +216,16 @@ class PoolScene(QGraphicsScene):
     def _find_column_for_street(self, street: str) -> Optional[PoolColumnItem]:
         return next((c for c in self._column_items if c.street == street), None)
 
-    def _get_column_order(self, street: str) -> int:
-        col = self._find_column_for_street(street)
-        return getattr(col, "_display_order", 999)
+    def _ordered_columns(self) -> list[PoolColumnItem]:
+        index_by_id = {id(col): idx for idx, col in enumerate(self._column_items)}
+        return sorted(
+            self._column_items,
+            key=lambda col: (
+                getattr(col, "_display_order", index_by_id.get(id(col), 0)),
+                index_by_id.get(id(col), 0),
+            ),
+        )
+
+    def _normalize_column_orders(self):
+        for order, col in enumerate(self._ordered_columns()):
+            col._display_order = order
