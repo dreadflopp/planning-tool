@@ -199,10 +199,30 @@ class VisitItem(QGraphicsObject):
         from controllers.route_layout_engine import _scaled
         base = _scaled(VISIT_HEIGHT, self._font_size)
         fs = self._font_size
-        text_w = self._text_col_width()
-        name_h = self._wrapped_height(self._entry.display_name, QFont("Segoe UI", fs, QFont.Weight.Bold), text_w, min_h=max(fs + 4, 16))
-        ins_h = self._wrapped_height(self._entry.display_insatser, QFont("Segoe UI", max(fs - 3, 7)), text_w, min_h=0)
-        dynamic = _PAD + name_h + max(fs + 6, 14) + max(fs + 6, 14) + (ins_h if ins_h > 0 else 0) + _PAD
+        w = self.width()
+        col1_x = _COLOR_STRIP_W + _PAD
+        full_text_w = max(80, w - col1_x - _PAD)
+        row3_h = max(fs + 8, 18)
+        name_h = self._wrapped_height(
+            self._entry.display_name,
+            QFont("Segoe UI", fs, QFont.Weight.Bold),
+            full_text_w,
+            min_h=max(fs + 4, 16),
+        )
+        addr_h = self._wrapped_height(
+            self._entry.display_address,
+            QFont("Segoe UI", max(fs - 2, 7), QFont.Weight.DemiBold),
+            full_text_w,
+            min_h=max(fs + 4, 14),
+        )
+        ins_h = self._wrapped_height(
+            self._entry.display_insatser,
+            QFont("Segoe UI", max(fs - 3, 7)),
+            full_text_w,
+            min_h=0,
+        )
+        band_gap = 2
+        dynamic = _PAD + name_h + band_gap + addr_h + band_gap + row3_h + band_gap + (ins_h if ins_h > 0 else 0) + _PAD
         return max(base, dynamic)
 
     def set_height_override(self, height: Optional[int]):
@@ -228,6 +248,42 @@ class VisitItem(QGraphicsObject):
 
     def boundingRect(self) -> QRectF:
         return QRectF(0, 0, self.width(), self.height())
+
+    def _row3_geometry(self) -> tuple[QRectF, QRectF, QRectF, QRectF, QRectF]:
+        w, h = self.width(), self.height()
+        fs = self._font_size
+        col1_x = _COLOR_STRIP_W + _PAD
+        full_text_w = max(80, w - col1_x - _PAD)
+        row3_h = max(fs + 8, 18)
+        name_h = self._wrapped_height(
+            self._entry.display_name,
+            QFont("Segoe UI", fs, QFont.Weight.Bold),
+            full_text_w,
+            min_h=max(fs + 4, 16),
+        )
+        addr_h = self._wrapped_height(
+            self._entry.display_address,
+            QFont("Segoe UI", max(fs - 2, 7), QFont.Weight.DemiBold),
+            full_text_w,
+            min_h=max(fs + 4, 14),
+        )
+        band_gap = 2
+        row3_y = _PAD + name_h + band_gap + addr_h + band_gap
+
+        control_w = (_COL2_W + _COL3_W + (_COL4_W if self._in_route else 0))
+        time_w = max(60, full_text_w - control_w - _PAD)
+        time_rect = QRectF(col1_x, row3_y, time_w, row3_h)
+
+        col2_x = col1_x + time_w + _PAD
+        col3_x = col2_x + _COL2_W
+        col4_x = col3_x + _COL3_W
+
+        dur_rect = QRectF(col2_x, row3_y, _COL2_W, row3_h)
+        up_rect = QRectF(col3_x, row3_y, _COL3_W, row3_h / 2)
+        dn_rect = QRectF(col3_x, row3_y + row3_h / 2, _COL3_W, row3_h / 2)
+        pos_up_rect = QRectF(col4_x, row3_y, _COL4_W, row3_h / 2)
+        pos_dn_rect = QRectF(col4_x, row3_y + row3_h / 2, _COL4_W, row3_h / 2)
+        return time_rect, dur_rect, up_rect, dn_rect, pos_up_rect, pos_dn_rect
 
     def paint(self, painter: QPainter, option, widget=None):
         w, h = self.width(), self.height()
@@ -276,46 +332,46 @@ class VisitItem(QGraphicsObject):
         text_color = QColor("#888888" if self._greyed_out else "#212121")
 
         col1_x = _COLOR_STRIP_W + _PAD
-        control_w = _COL2_W + _COL3_W + (_COL4_W if self._in_route else 0)
-        col2_x = w - control_w - _PAD
-        col3_x = col2_x + _COL2_W
-        col4_x = col3_x + _COL3_W
-        text_w = max(80, col2_x - col1_x - _PAD)
-        line_h = max(fs + 6, 14)
+        full_text_w = max(80, w - col1_x - _PAD)
+        row3_h = max(fs + 8, 18)
         y = _PAD
 
-        # --- Column 1 ---
+        # --- Band 1: Name (full width) ---
         name_font = QFont("Segoe UI", fs, QFont.Weight.Bold)
         painter.setFont(name_font)
         painter.setPen(text_color)
-        name_h = self._wrapped_height(self._entry.display_name, name_font, text_w, min_h=line_h)
-        name_rect = QRectF(col1_x, y, text_w, name_h)
-        painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
+        name_h = self._wrapped_height(self._entry.display_name, name_font, full_text_w, min_h=max(fs + 4, 16))
+        name_rect = QRectF(col1_x, y, full_text_w, name_h)
+        painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
                          self._entry.display_name)
-        y += name_h
+        y += name_h + 2
 
+        # --- Band 2: Address (full width) ---
         small_font = QFont("Segoe UI", max(fs - 2, 7), QFont.Weight.DemiBold)
         painter.setFont(small_font)
+        addr_h = self._wrapped_height(self._entry.display_address, small_font, full_text_w, min_h=max(fs + 4, 14))
+        addr_rect = QRectF(col1_x, y, full_text_w, addr_h)
+        painter.drawText(addr_rect,
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+                         self._entry.display_address)
+        y += addr_h + 2
 
+        # --- Band 3: Time (left) + duration/controls (right) ---
         from controllers.route_recalculation_engine import _display_time
         time_str = f"{_display_time(self._entry.start_time)} – {_display_time(self._entry.end_time)}"
-        time_rect = QRectF(col1_x, y, text_w, line_h)
+        time_rect, dur_rect, up_rect, dn_rect, pos_up_rect, pos_dn_rect = self._row3_geometry()
+        painter.setFont(small_font)
         painter.drawText(time_rect,
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          time_str)
-        y += line_h
+        y = time_rect.y() + row3_h + 2
 
-        addr_rect = QRectF(col1_x, y, text_w, line_h)
-        painter.drawText(addr_rect,
-                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         self._entry.display_address)
-        y += line_h
-
+        # --- Band 4: Insatser (full width) ---
         ins = self._entry.display_insatser
         if ins:
             ins_font = QFont("Segoe UI", max(fs - 3, 7))
             painter.setFont(ins_font)
-            ins_rect = QRectF(col1_x, y, text_w, h - y - _PAD)
+            ins_rect = QRectF(col1_x, y, full_text_w, h - y - _PAD)
             painter.drawText(ins_rect,
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
                              ins)
@@ -330,7 +386,6 @@ class VisitItem(QGraphicsObject):
             dur_font = QFont("Segoe UI", fs + 1, QFont.Weight.Bold)
             painter.setFont(dur_font)
             painter.setPen(QColor("#1565C0"))
-            dur_rect = QRectF(col2_x, _PAD, _COL2_W, h * 0.5)
             painter.drawText(dur_rect,
                              Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
                              f"{dur}")
@@ -339,7 +394,6 @@ class VisitItem(QGraphicsObject):
                 # Duration arrows ▲▼ (to the right of duration)
                 arrow_font = QFont("Segoe UI", max(fs - 3, 7))
                 painter.setFont(arrow_font)
-                up_rect, dn_rect = self._duration_arrow_rects(h, col3_x)
                 up_col = QColor("#42A5F5") if self._hover_action == "dur_up" else QColor("#1565C0")
                 dn_col = QColor("#42A5F5") if self._hover_action == "dur_dn" else QColor("#1565C0")
                 painter.setPen(up_col)
@@ -348,31 +402,16 @@ class VisitItem(QGraphicsObject):
                 painter.drawText(dn_rect, Qt.AlignmentFlag.AlignCenter, "▼")
 
                 # --- Column 3: position arrows ---
-                pos_up_rect = QRectF(col4_x, _PAD, _COL4_W, h * 0.5 - _PAD)
-                pos_dn_rect = QRectF(col4_x, h * 0.5, _COL4_W, h * 0.5 - _PAD)
                 painter.setFont(arrow_font)
                 painter.setPen(QColor("#78909C") if self._hover_action == "pos_up" else QColor("#555555"))
                 painter.drawText(pos_up_rect, Qt.AlignmentFlag.AlignCenter, "↑")
                 painter.setPen(QColor("#78909C") if self._hover_action == "pos_dn" else QColor("#555555"))
                 painter.drawText(pos_dn_rect, Qt.AlignmentFlag.AlignCenter, "↓")
 
-    def _duration_arrow_rects(self, h: int, col3_x: float) -> tuple[QRectF, QRectF]:
-        top_h = h * 0.5 - _PAD
-        half = top_h / 2
-        up_rect = QRectF(col3_x, _PAD, _COL3_W, half)
-        dn_rect = QRectF(col3_x, _PAD + half, _COL3_W, half)
-        return up_rect, dn_rect
-
     def _hit_action(self, pos: QPointF) -> Optional[str]:
         if not self._in_route:
             return None
-        w, h = self.width(), self.height()
-        col2_x = w - (_COL2_W + _COL3_W + _COL4_W) - _PAD
-        col3_x = col2_x + _COL2_W
-        col4_x = col3_x + _COL3_W
-        up_rect, dn_rect = self._duration_arrow_rects(h, col3_x)
-        pos_up_rect = QRectF(col4_x, _PAD, _COL4_W, h * 0.5 - _PAD)
-        pos_dn_rect = QRectF(col4_x, h * 0.5, _COL4_W, h * 0.5 - _PAD)
+        _time_rect, _dur_rect, up_rect, dn_rect, pos_up_rect, pos_dn_rect = self._row3_geometry()
         if up_rect.contains(pos):
             return "dur_up"
         if dn_rect.contains(pos):
@@ -386,11 +425,8 @@ class VisitItem(QGraphicsObject):
     def _is_time_interval_hit(self, pos: QPointF) -> bool:
         if not self._in_route:
             return False
-        w, h = self.width(), self.height()
-        col1_x = _COLOR_STRIP_W + _PAD
-        col2_x = w - (_COL2_W + _COL3_W + _COL4_W) - _PAD
-        return (col1_x <= pos.x() <= col2_x and
-                h * 0.28 <= pos.y() <= h * 0.50)
+        time_rect, _dur_rect, _up_rect, _dn_rect, _pos_up_rect, _pos_dn_rect = self._row3_geometry()
+        return time_rect.contains(pos)
 
     def hoverMoveEvent(self, event):
         new_action = self._hit_action(event.pos())
