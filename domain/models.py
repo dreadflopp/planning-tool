@@ -224,6 +224,7 @@ class Settings:
     default_travel_walk: int = 5
     default_travel_mode: str = "walk"
     minimum_time_between_visits: int = 2
+    ui_scale_percent: int = 100
     font_size: int = 12
     api_usage_count: int = 0
     api_usage_limit: int = 10000

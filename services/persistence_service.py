@@ -258,6 +258,8 @@ class PersistenceService:
 
     def load_settings(self) -> Settings:
         s = Settings()
+        loaded_font_size: Optional[int] = None
+        loaded_ui_scale = False
         cur = self._conn.execute("SELECT key, value FROM settings")
         for row in cur.fetchall():
             k, v = row["key"], row["value"]
@@ -271,8 +273,18 @@ class PersistenceService:
                 s.default_travel_mode = v
             elif k == "minimum_time_between_visits":
                 s.minimum_time_between_visits = int(v)
+            elif k == "ui_scale_percent":
+                try:
+                    s.ui_scale_percent = max(50, min(200, int(v)))
+                except Exception:
+                    s.ui_scale_percent = 100
+                loaded_ui_scale = True
             elif k == "font_size":
-                s.font_size = int(v)
+                try:
+                    loaded_font_size = int(v)
+                    s.font_size = loaded_font_size
+                except Exception:
+                    loaded_font_size = None
             elif k == "api_usage_count":
                 s.api_usage_count = int(v)
             elif k == "api_usage_limit":
@@ -310,16 +322,25 @@ class PersistenceService:
                 s.visit_color_yellow = str(v)
             elif k == "visit_color_black":
                 s.visit_color_black = str(v)
+
+        if not loaded_ui_scale and loaded_font_size is not None:
+            s.ui_scale_percent = max(50, min(200, int(round((loaded_font_size / 12.0) * 100))))
+        s.font_size = max(6, min(30, int(round(12 * s.ui_scale_percent / 100.0))))
         return s
 
     def save_settings(self, s: Settings):
+        scale_percent = max(50, min(200, int(s.ui_scale_percent)))
+        effective_font_size = max(6, min(30, int(round(12 * scale_percent / 100.0))))
+        s.ui_scale_percent = scale_percent
+        s.font_size = effective_font_size
         rows = [
             ("default_travel_car", str(s.default_travel_car)),
             ("default_travel_bike", str(s.default_travel_bike)),
             ("default_travel_walk", str(s.default_travel_walk)),
             ("default_travel_mode", s.default_travel_mode),
             ("minimum_time_between_visits", str(s.minimum_time_between_visits)),
-            ("font_size", str(s.font_size)),
+            ("ui_scale_percent", str(scale_percent)),
+            ("font_size", str(effective_font_size)),
             ("api_usage_count", str(s.api_usage_count)),
             ("api_usage_limit", str(s.api_usage_limit)),
             ("extra_time_minutes", str(s.extra_time_minutes)),

@@ -114,6 +114,9 @@ class MainWindow(QMainWindow):
         # Services / controllers
         self._travel_svc = TravelTimeService(self._db, self._api_key, self._settings)
         self._recalc = RouteRecalculationEngine(self._db, self._travel_svc, self._settings)
+        initial_scale = max(50, min(200, int(getattr(self._settings, "ui_scale_percent", 100))))
+        self._settings.ui_scale_percent = initial_scale
+        self._settings.font_size = max(6, min(30, int(round(12 * initial_scale / 100.0))))
         self._layout_engine = RouteLayoutEngine(self._settings.font_size)
         self._autosave = AutoSaveManager(parent=self)
         self._autosave.save_requested.connect(self._on_autosave)
@@ -174,7 +177,7 @@ class MainWindow(QMainWindow):
             "_on_extra_time_minutes_changed",
             "_on_reset_all",
             "_on_default_mode_changed",
-            "_on_font_size_changed",
+            "_on_ui_scale_percent_changed",
             "_on_import_excel",
             "_on_open_settings",
             "_on_export_state",
@@ -606,6 +609,27 @@ class MainWindow(QMainWindow):
         extra_row.addWidget(self._extra_time_spin)
         self._extra_time_toolbar_container.setMaximumWidth(210)
         self._command_flow.addWidget(self._extra_time_toolbar_container)
+
+        self._ui_scale_toolbar_container = QWidget(self._command_bar)
+        self._ui_scale_toolbar_container.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        scale_row = QHBoxLayout(self._ui_scale_toolbar_container)
+        scale_row.setContentsMargins(0, 0, 0, 0)
+        scale_row.setSpacing(4)
+        self._ui_scale_label = QLabel("Skala:")
+        scale_row.addWidget(self._ui_scale_label)
+        self._ui_scale_spin = QSpinBox()
+        self._ui_scale_spin.setRange(50, 200)
+        self._ui_scale_spin.setSingleStep(10)
+        self._ui_scale_spin.setSuffix(" %")
+        self._ui_scale_spin.setMinimumWidth(84)
+        self._ui_scale_spin.setMaximumWidth(96)
+        self._ui_scale_spin.setValue(max(50, min(200, int(self._settings.ui_scale_percent))))
+        self._ui_scale_spin.valueChanged.connect(self._on_ui_scale_percent_changed)
+        scale_row.addWidget(self._ui_scale_spin)
+        self._ui_scale_toolbar_container.setMaximumWidth(190)
+        self._command_flow.addWidget(self._ui_scale_toolbar_container)
 
         # System
         act_travel_log = QAction("API-logg", self)
@@ -1966,15 +1990,18 @@ class MainWindow(QMainWindow):
         self._autosave.mark_dirty()
 
     # ------------------------------------------------------------------
-    # Font size
+    # UI scale
     # ------------------------------------------------------------------
 
     @Slot(int)
-    def _on_font_size_changed(self, size: int):
-        self._settings.font_size = size
-        self._layout_engine.font_size = size
-        self._route_scene.set_font_size(size)
-        self._pool_scene.set_font_size(size)
+    def _on_ui_scale_percent_changed(self, percent: int):
+        clamped_percent = max(50, min(200, int(percent)))
+        self._settings.ui_scale_percent = clamped_percent
+        scaled_font_size = max(6, min(30, int(round(12 * clamped_percent / 100.0))))
+        self._settings.font_size = scaled_font_size
+        self._layout_engine.font_size = scaled_font_size
+        self._route_scene.set_font_size(scaled_font_size)
+        self._pool_scene.set_font_size(scaled_font_size)
         self._autosave.mark_dirty()
 
     # ------------------------------------------------------------------
@@ -2058,7 +2085,10 @@ class MainWindow(QMainWindow):
                     self._map_window = None
             self._db.save_settings(self._settings)
             # Sync toolbar widgets
-            self._on_font_size_changed(self._settings.font_size)
+            self._ui_scale_spin.blockSignals(True)
+            self._ui_scale_spin.setValue(max(50, min(200, int(self._settings.ui_scale_percent))))
+            self._ui_scale_spin.blockSignals(False)
+            self._on_ui_scale_percent_changed(self._settings.ui_scale_percent)
             idx = self._mode_combo.findData(self._settings.default_travel_mode)
             if idx >= 0:
                 self._mode_combo.setCurrentIndex(idx)
