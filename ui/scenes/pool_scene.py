@@ -31,6 +31,7 @@ class PoolScene(QGraphicsScene):
     visit_pair_requested = Signal(int)         # visit_id
     visit_unpair_requested = Signal(int)       # visit_id
     column_order_changed = Signal()
+    template_edit_requested = Signal(int)
 
     def __init__(self, layout_engine, parent=None):
         super().__init__(parent)
@@ -52,7 +53,7 @@ class PoolScene(QGraphicsScene):
         self._extra_time_template = None
 
         # Default template visits at top
-        for template in templates:
+        for template_index, template in enumerate(templates):
             if template.get("type") == "extra_time":
                 item = ExtraTimeTemplateItem(
                     duration_minutes=int(template.get("duration_minutes", 0)),
@@ -66,8 +67,10 @@ class PoolScene(QGraphicsScene):
                 name=template.get("name", "Kontor"),
                 full_address=template.get("address", ""),
                 duration_minutes=int(template.get("duration_minutes", 10)),
+                template_index=template_index,
                 font_size=self._layout.font_size,
             )
+            item.edit_requested.connect(self.template_edit_requested.emit)
             self.addItem(item)
             self._template_items.append(item)
 
