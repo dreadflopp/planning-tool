@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS routes (
     name         TEXT    NOT NULL,
     notes        TEXT    NOT NULL DEFAULT '',
     display_order INTEGER NOT NULL DEFAULT 0,
-    route_color  TEXT
+    route_color  TEXT,
+    shift_blocks INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS route_visit_order (
@@ -197,6 +198,10 @@ class PersistenceService:
             self._conn.execute(
                 "ALTER TABLE routes ADD COLUMN route_color TEXT"
             )
+        if "shift_blocks" not in existing_routes_cols:
+            self._conn.execute(
+                "ALTER TABLE routes ADD COLUMN shift_blocks INTEGER NOT NULL DEFAULT 0"
+            )
 
         cur = self._conn.execute("PRAGMA table_info(extra_time_blocks)")
         if not cur.fetchall():
@@ -299,6 +304,8 @@ class PersistenceService:
                 s.show_space_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
             elif k == "show_extra_time_blocks":
                 s.show_extra_time_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
+            elif k == "align_pair_visits":
+                s.align_pair_visits = str(v).strip().lower() in {"1", "true", "yes", "on"}
             elif k == "debug_mode":
                 s.debug_mode = str(v).strip().lower() in {"1", "true", "yes", "on"}
             elif k == "file_logging_enabled":
@@ -348,6 +355,7 @@ class PersistenceService:
             ("show_travel_blocks", "1" if s.show_travel_blocks else "0"),
             ("show_space_blocks", "1" if s.show_space_blocks else "0"),
             ("show_extra_time_blocks", "1" if s.show_extra_time_blocks else "0"),
+            ("align_pair_visits", "1" if s.align_pair_visits else "0"),
             ("debug_mode", "1" if s.debug_mode else "0"),
             ("file_logging_enabled", "1" if s.file_logging_enabled else "0"),
             ("file_logging_retention_days", str(max(1, int(s.file_logging_retention_days)))),
@@ -512,6 +520,7 @@ class PersistenceService:
             notes=row["notes"],
             display_order=row["display_order"],
             route_color=row["route_color"] if "route_color" in row.keys() else None,
+            vertical_shift_blocks=max(0, int(row["shift_blocks"])) if "shift_blocks" in row.keys() else 0,
         )
 
     def _load_entries_for_route(self, route_id: int, visits_by_id: dict) -> list[RouteEntry]:
@@ -576,16 +585,29 @@ class PersistenceService:
 
     def create_route(self, name: str, display_order: int) -> Route:
         cur = self._conn.execute(
-            "INSERT INTO routes(name, notes, display_order, route_color) VALUES (?, '', ?, NULL)",
+            "INSERT INTO routes(name, notes, display_order, route_color, shift_blocks) VALUES (?, '', ?, NULL, 0)",
             (name, display_order),
         )
         self._conn.commit()
-        return Route(id=cur.lastrowid, name=name, display_order=display_order, route_color=None)
+        return Route(
+            id=cur.lastrowid,
+            name=name,
+            display_order=display_order,
+            route_color=None,
+            vertical_shift_blocks=0,
+        )
 
     def save_route(self, route: Route):
         self._conn.execute(
-            "UPDATE routes SET name=?, notes=?, display_order=?, route_color=? WHERE id=?",
-            (route.name, route.notes, route.display_order, route.route_color, route.id),
+            "UPDATE routes SET name=?, notes=?, display_order=?, route_color=?, shift_blocks=? WHERE id=?",
+            (
+                route.name,
+                route.notes,
+                route.display_order,
+                route.route_color,
+                max(0, int(route.vertical_shift_blocks)),
+                route.id,
+            ),
         )
         self._conn.commit()
 
@@ -858,9 +880,10 @@ class PersistenceService:
             )
         for row in state.get("routes", []):
             row.setdefault("route_color", None)
+            row.setdefault("shift_blocks", 0)
             self._conn.execute(
-                "INSERT INTO routes(id,name,notes,display_order,route_color) "
-                "VALUES (:id,:name,:notes,:display_order,:route_color)",
+                "INSERT INTO routes(id,name,notes,display_order,route_color,shift_blocks) "
+                "VALUES (:id,:name,:notes,:display_order,:route_color,:shift_blocks)",
                 row,
             )
         for row in state.get("route_visit_order", []):

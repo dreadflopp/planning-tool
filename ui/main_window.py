@@ -129,6 +129,7 @@ class MainWindow(QMainWindow):
         self._map_window: Optional[VisitMapWindow] = None
         self._selected_visit_id: Optional[int] = None
         self._global_search_query: str = ""
+        self._last_pair_alignment_conflict_count: int = 0
 
         # Paired visit index: visit_id → partner_visit_id
         self._pairs: dict[int, int] = {}
@@ -156,6 +157,7 @@ class MainWindow(QMainWindow):
             "_on_route_renamed",
             "_on_route_notes_changed",
             "_on_route_color_changed",
+            "_on_route_shift_blocks_changed",
             "_on_route_delete",
             "_on_entry_dropped",
             "_on_entry_returned",
@@ -173,6 +175,7 @@ class MainWindow(QMainWindow):
             "_on_travel_source_toggle",
             "_on_time_integrity",
             "_on_block_visibility_changed",
+            "_on_pair_alignment_toggled",
             "_on_extra_time_auto_toggled",
             "_on_extra_time_minutes_changed",
             "_on_reset_all",
@@ -536,6 +539,12 @@ class MainWindow(QMainWindow):
         self._show_extra_time_action.toggled.connect(self._on_block_visibility_changed)
         _add_action_button(self._show_extra_time_action)
 
+        self._pair_align_action = QAction("Par-justera", self)
+        self._pair_align_action.setCheckable(True)
+        self._pair_align_action.setChecked(bool(self._settings.align_pair_visits))
+        self._pair_align_action.toggled.connect(self._on_pair_alignment_toggled)
+        _add_action_button(self._pair_align_action)
+
         # Sök
         self._search_toolbar_container = QWidget(self._command_bar)
         self._search_toolbar_container.setSizePolicy(
@@ -672,6 +681,7 @@ class MainWindow(QMainWindow):
         s.route_renamed.connect(self._on_route_renamed)
         s.route_notes_changed.connect(self._on_route_notes_changed)
         s.route_color_changed.connect(self._on_route_color_changed)
+        s.route_shift_blocks_changed.connect(self._on_route_shift_blocks_changed)
         s.route_delete_requested.connect(self._on_route_delete)
         s.entry_dropped.connect(self._on_entry_dropped)
         s.entry_moved.connect(self._on_entry_moved)
@@ -689,6 +699,7 @@ class MainWindow(QMainWindow):
         s.visit_selected.connect(self._on_route_visit_selected)
         s.entry_pair_requested.connect(self._on_route_entry_pair_requested)
         s.entry_unpair_requested.connect(self._on_route_entry_unpair_requested)
+        s.pair_alignment_conflicts_changed.connect(self._on_pair_alignment_conflicts_changed)
 
     def _wire_pool_scene(self):
         self._pool_scene.column_order_changed.connect(self._on_pool_column_order_changed)
@@ -737,6 +748,7 @@ class MainWindow(QMainWindow):
         self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._on_block_visibility_changed()
+        self._route_scene.set_pair_alignment_enabled(self._settings.align_pair_visits)
         self._apply_filters_and_search()
         self._sync_map_window_visits()
         self._sync_map_selection()
@@ -948,6 +960,14 @@ class MainWindow(QMainWindow):
             entry.route_color = route.route_color
         self._db.save_route(route)
         self._route_scene.rebuild_route(route, animate=False)
+        self._autosave.mark_dirty(route_id)
+
+    @Slot(int, int)
+    def _on_route_shift_blocks_changed(self, route_id: int, blocks: int):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        route.vertical_shift_blocks = max(0, int(blocks))
         self._autosave.mark_dirty(route_id)
 
     @Slot(int)
@@ -1938,6 +1958,37 @@ class MainWindow(QMainWindow):
         self._autosave.mark_dirty()
 
     @Slot(bool)
+    def _on_pair_alignment_toggled(self, checked: bool):
+        self._settings.align_pair_visits = bool(checked)
+        self._route_scene.set_pair_alignment_enabled(self._settings.align_pair_visits)
+        if not self._settings.align_pair_visits:
+            self._last_pair_alignment_conflict_count = 0
+            self.statusBar().clearMessage()
+        self._autosave.mark_dirty()
+
+    @Slot(int)
+    def _on_pair_alignment_conflicts_changed(self, count: int):
+        conflict_count = max(0, int(count))
+        if conflict_count == self._last_pair_alignment_conflict_count:
+            return
+        self._last_pair_alignment_conflict_count = conflict_count
+        if not self._settings.align_pair_visits:
+            return
+        if conflict_count <= 0:
+            self.statusBar().showMessage("Par-justering: alla par kunde justeras.", 2500)
+            return
+        if conflict_count == 1:
+            self.statusBar().showMessage(
+                "Par-justering: 1 par hoppades över (korsande ordning mellan rutter).",
+                7000,
+            )
+            return
+        self.statusBar().showMessage(
+            f"Par-justering: {conflict_count} par hoppades över (korsande ordning mellan rutter).",
+            7000,
+        )
+
+    @Slot(bool)
     def _on_extra_time_auto_toggled(self, checked: bool):
         self._settings.extra_time_auto_place = bool(checked)
         self._autosave.mark_dirty()
@@ -2094,6 +2145,7 @@ class MainWindow(QMainWindow):
                 self._mode_combo.setCurrentIndex(idx)
             self._extra_time_auto_action.setChecked(bool(self._settings.extra_time_auto_place))
             self._extra_time_spin.setValue(max(0, int(self._settings.extra_time_minutes)))
+            self._pair_align_action.setChecked(bool(self._settings.align_pair_visits))
             self._get_travel_status().configure_file_logging(
                 self._settings.file_logging_enabled,
                 self._settings.file_logging_retention_days,
@@ -2898,6 +2950,7 @@ class MainWindow(QMainWindow):
         self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._on_block_visibility_changed()
+        self._route_scene.set_pair_alignment_enabled(self._settings.align_pair_visits)
         self._apply_filters_and_search()
         self._sync_map_window_visits()
         self._sync_map_selection()

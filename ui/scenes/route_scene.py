@@ -32,6 +32,7 @@ class RouteScene(QGraphicsScene):
     route_renamed = Signal(int, str)               # (route_id, new_name)
     route_notes_changed = Signal(int, str)
     route_color_changed = Signal(int, object)      # (route_id, color|None)
+    route_shift_blocks_changed = Signal(int, int)  # (route_id, shift_blocks)
     route_delete_requested = Signal(int)
     entry_dropped = Signal(int, object)            # (route_id, RouteEntry-like dict)
     entry_moved = Signal(int, int, int)            # (route_id, entry_id, direction)
@@ -49,6 +50,7 @@ class RouteScene(QGraphicsScene):
     travel_retry = Signal(int, int)                # (route_id, seg_id)
     travel_source_toggle = Signal(int, int)        # (route_id, seg_id)
     visit_selected = Signal(int, int)              # (route_id, entry_id)
+    pair_alignment_conflicts_changed = Signal(int) # skipped pair count
 
     def __init__(self, layout_engine, parent=None):
         super().__init__(parent)
@@ -57,6 +59,8 @@ class RouteScene(QGraphicsScene):
         self._drop_indicator: Optional[QGraphicsLineItem] = None
         self._extra_time_minutes = 0
         self._show_extra_time = True
+        self._pair_alignment_enabled = False
+        self._pair_alignment_conflicts_count = 0
         self._inconsistent_entry_ids_by_route: dict[int, set[int]] = {}
         self._inconsistent_travel_pairs_by_route: dict[int, set[tuple[int, int]]] = {}
         self._inconsistent_empty_pairs_by_route: dict[int, set[tuple[int, int]]] = {}
@@ -74,12 +78,14 @@ class RouteScene(QGraphicsScene):
             self._add_column(route)
         self._normalize_route_orders()
         self._normalize_paired_visit_heights()
+        self._apply_pair_alignment_visuals()
         self._reposition_columns()
 
     def add_route(self, route: Route):
         self._add_column(route)
         self._normalize_route_orders()
         self._normalize_paired_visit_heights()
+        self._apply_pair_alignment_visuals()
         self._reposition_columns()
 
     def remove_route(self, route_id: int):
@@ -89,6 +95,7 @@ class RouteScene(QGraphicsScene):
             self._column_items.remove(item)
         self._normalize_route_orders()
         self._normalize_paired_visit_heights()
+        self._apply_pair_alignment_visuals()
         self._reposition_columns()
 
     def rebuild_route(self, route: Route, animate: bool = False):
@@ -102,6 +109,7 @@ class RouteScene(QGraphicsScene):
                 self._inconsistent_empty_pairs_by_route.get(route.id, set()),
             )
             self._normalize_paired_visit_heights()
+            self._apply_pair_alignment_visuals()
             self._reposition_columns(animate)
 
     def set_inconsistent_entries(self, by_route: dict[int, set[int]]):
@@ -133,6 +141,7 @@ class RouteScene(QGraphicsScene):
         for col in self._column_items:
             col.set_font_size(size)
         self._normalize_paired_visit_heights()
+        self._apply_pair_alignment_visuals()
         self._reposition_columns()
 
     def set_block_visibility(self, show_travel: bool, show_space: bool, show_extra_time: bool):
@@ -140,6 +149,7 @@ class RouteScene(QGraphicsScene):
         for col in self._column_items:
             col.set_block_visibility(show_travel, show_space, self._show_extra_time)
         self._normalize_paired_visit_heights()
+        self._apply_pair_alignment_visuals()
         self._reposition_columns()
 
     def set_extra_time_minutes(self, minutes: int):
@@ -147,6 +157,15 @@ class RouteScene(QGraphicsScene):
         for col in self._column_items:
             col.set_extra_time_minutes(self._extra_time_minutes)
         self._normalize_paired_visit_heights()
+        self._apply_pair_alignment_visuals()
+        self._reposition_columns()
+
+    def set_pair_alignment_enabled(self, enabled: bool):
+        new_enabled = bool(enabled)
+        if self._pair_alignment_enabled == new_enabled:
+            return
+        self._pair_alignment_enabled = new_enabled
+        self._apply_pair_alignment_visuals()
         self._reposition_columns()
 
     def apply_filter(self, active_tags: set[str], mode: str = "or"):
@@ -339,6 +358,8 @@ class RouteScene(QGraphicsScene):
         col.notes_requested.connect(self._on_notes)
         col.route_color_requested.connect(
             lambda c, color: self.route_color_changed.emit(c.route.id, color))
+        col.route_shift_blocks_changed.connect(
+            lambda c, blocks: self.route_shift_blocks_changed.emit(c.route.id, blocks))
         col.delete_requested.connect(
             lambda c: self.route_delete_requested.emit(c.route.id))
         col.entry_move_up.connect(
@@ -439,6 +460,144 @@ class RouteScene(QGraphicsScene):
 
         for col in self._column_items:
             col.relayout_items(animate=False)
+
+    def _apply_pair_alignment_visuals(self):
+        if not self._column_items:
+            self._set_pair_alignment_conflicts_count(0)
+            return
+
+        for col in self._column_items:
+            col.set_pair_alignment(False, {})
+
+        if not self._pair_alignment_enabled:
+            self._set_pair_alignment_conflicts_count(0)
+            return
+
+        visit_top_by_id: dict[int, float] = {}
+        pair_members_by_root: dict[int, tuple[int, int]] = {}
+        for col in self._column_items:
+            for visit_item in col.visit_items():
+                visit_id = visit_item.entry.visit_id
+                if visit_id is None:
+                    continue
+                visit_top_by_id[visit_id] = float(visit_item.pos().y())
+                visit = visit_item.entry.visit
+                partner_id = visit.pair_partner_id if visit else None
+                if not partner_id:
+                    continue
+                if partner_id not in visit_top_by_id:
+                    continue
+                root = int(min(visit_id, partner_id))
+                a, b = int(min(visit_id, partner_id)), int(max(visit_id, partner_id))
+                pair_members_by_root[root] = (a, b)
+
+        if not pair_members_by_root:
+            self._set_pair_alignment_conflicts_count(0)
+            return
+
+        pair_root_by_visit_id: dict[int, int] = {}
+        for root, (a, b) in pair_members_by_root.items():
+            pair_root_by_visit_id[a] = root
+            pair_root_by_visit_id[b] = root
+
+        edge_set: set[tuple[int, int]] = set()
+        for col in self._column_items:
+            ordered_roots: list[int] = []
+            seen_in_route: set[int] = set()
+            for visit_item in col.visit_items():
+                visit_id = visit_item.entry.visit_id
+                if visit_id is None:
+                    continue
+                root = pair_root_by_visit_id.get(int(visit_id))
+                if root is None or root in seen_in_route:
+                    continue
+                seen_in_route.add(root)
+                ordered_roots.append(root)
+            for i in range(len(ordered_roots)):
+                left = ordered_roots[i]
+                for j in range(i + 1, len(ordered_roots)):
+                    right = ordered_roots[j]
+                    if left != right:
+                        edge_set.add((left, right))
+
+        incoming_by_root: dict[int, set[int]] = {root: set() for root in pair_members_by_root}
+        outgoing_by_root: dict[int, set[int]] = {root: set() for root in pair_members_by_root}
+        for src, dst in edge_set:
+            if src in outgoing_by_root and dst in incoming_by_root:
+                outgoing_by_root[src].add(dst)
+                incoming_by_root[dst].add(src)
+
+        def _has_cycle(nodes: set[int], edges: set[tuple[int, int]]) -> bool:
+            visiting: set[int] = set()
+            visited: set[int] = set()
+            adj: dict[int, list[int]] = {n: [] for n in nodes}
+            for a, b in edges:
+                if a in nodes and b in nodes:
+                    adj[a].append(b)
+
+            def _dfs(node: int) -> bool:
+                if node in visited:
+                    return False
+                if node in visiting:
+                    return True
+                visiting.add(node)
+                for nxt in adj.get(node, []):
+                    if _dfs(nxt):
+                        return True
+                visiting.remove(node)
+                visited.add(node)
+                return False
+
+            for node in nodes:
+                if _dfs(node):
+                    return True
+            return False
+
+        def _pair_anchor(root: int) -> float:
+            a, b = pair_members_by_root[root]
+            return max(float(visit_top_by_id.get(a, 0.0)), float(visit_top_by_id.get(b, 0.0)))
+
+        selected_roots: set[int] = set()
+        selected_edges: set[tuple[int, int]] = set()
+        all_roots_sorted = sorted(pair_members_by_root.keys(), key=lambda rid: (_pair_anchor(rid), rid))
+        for root in all_roots_sorted:
+            candidate_nodes = set(selected_roots)
+            candidate_nodes.add(root)
+            candidate_edges = set(selected_edges)
+            for src in incoming_by_root.get(root, set()):
+                if src in candidate_nodes:
+                    candidate_edges.add((src, root))
+            for dst in outgoing_by_root.get(root, set()):
+                if dst in candidate_nodes:
+                    candidate_edges.add((root, dst))
+            if _has_cycle(candidate_nodes, candidate_edges):
+                continue
+            selected_roots = candidate_nodes
+            selected_edges = candidate_edges
+
+        target_y_by_visit_id: dict[int, float] = {}
+        for root in selected_roots:
+            a, b = pair_members_by_root[root]
+            top_a = visit_top_by_id.get(a)
+            top_b = visit_top_by_id.get(b)
+            if top_a is None or top_b is None:
+                continue
+            target_y = max(float(top_a), float(top_b))
+            target_y_by_visit_id[a] = target_y
+            target_y_by_visit_id[b] = target_y
+
+        skipped_count = max(0, len(pair_members_by_root) - len(selected_roots))
+        self._set_pair_alignment_conflicts_count(skipped_count)
+
+        for col in self._column_items:
+            col.set_pair_alignment(True, target_y_by_visit_id)
+
+    def _set_pair_alignment_conflicts_count(self, count: int):
+        new_count = max(0, int(count))
+        if new_count == self._pair_alignment_conflicts_count:
+            return
+        self._pair_alignment_conflicts_count = new_count
+        self.pair_alignment_conflicts_changed.emit(new_count)
 
     def _reposition_columns(self, animate: bool = False):
         self._normalize_route_orders()
