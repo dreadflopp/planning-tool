@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QGraphicsObject, QGraphicsSceneMouseEvent
 
 from domain.models import Visit, RouteEntry
 from domain.constants import (
-    VISIT_WIDTH, HEADER_HEIGHT, VISIT_HEIGHT,
+    VISIT_WIDTH, HEADER_HEIGHT,
     COLOR_POOL_COLUMN_BG, COLOR_HEADER_BG,
 )
 from ui.items.visit_item import VisitItem
@@ -69,6 +69,12 @@ class PoolColumnItem(QGraphicsObject):
     def visits(self) -> list[Visit]:
         return list(self._visits)
 
+    def visit_items(self) -> list[VisitItem]:
+        return list(self._visit_items)
+
+    def relayout_items(self):
+        self._layout_children()
+
     def column_width(self) -> int:
         from controllers.route_layout_engine import _scaled
         if self._is_collapsed:
@@ -102,11 +108,9 @@ class PoolColumnItem(QGraphicsObject):
         return _scaled(_TITLE_ROW_BASE_H, self._font_size)
 
     def total_height(self) -> int:
-        from controllers.route_layout_engine import _scaled
         if self._is_collapsed:
             return self.header_height()
-        vh = _scaled(VISIT_HEIGHT, self._font_size)
-        return self.header_height() + len(self._visits) * vh + _PAD * 2
+        return self.header_height() + sum(vi.height() for vi in self._visit_items) + _PAD * 2
 
     def add_visit(self, visit: Visit, animate: bool = False):
         """Re-insert a visit that was dragged back from a route."""

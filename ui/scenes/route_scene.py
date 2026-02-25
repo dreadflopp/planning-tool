@@ -73,11 +73,13 @@ class RouteScene(QGraphicsScene):
         for route in routes:
             self._add_column(route)
         self._normalize_route_orders()
+        self._normalize_paired_visit_heights()
         self._reposition_columns()
 
     def add_route(self, route: Route):
         self._add_column(route)
         self._normalize_route_orders()
+        self._normalize_paired_visit_heights()
         self._reposition_columns()
 
     def remove_route(self, route_id: int):
@@ -86,9 +88,10 @@ class RouteScene(QGraphicsScene):
             self.removeItem(item)
             self._column_items.remove(item)
         self._normalize_route_orders()
+        self._normalize_paired_visit_heights()
         self._reposition_columns()
 
-    def rebuild_route(self, route: Route, animate: bool = True):
+    def rebuild_route(self, route: Route, animate: bool = False):
         item = self._find_column(route.id)
         if item:
             item._route = route
@@ -98,6 +101,7 @@ class RouteScene(QGraphicsScene):
                 self._inconsistent_travel_pairs_by_route.get(route.id, set()),
                 self._inconsistent_empty_pairs_by_route.get(route.id, set()),
             )
+            self._normalize_paired_visit_heights()
             self._reposition_columns(animate)
 
     def set_inconsistent_entries(self, by_route: dict[int, set[int]]):
@@ -128,18 +132,21 @@ class RouteScene(QGraphicsScene):
     def set_font_size(self, size: int):
         for col in self._column_items:
             col.set_font_size(size)
+        self._normalize_paired_visit_heights()
         self._reposition_columns()
 
     def set_block_visibility(self, show_travel: bool, show_space: bool, show_extra_time: bool):
         self._show_extra_time = bool(show_extra_time)
         for col in self._column_items:
             col.set_block_visibility(show_travel, show_space, self._show_extra_time)
+        self._normalize_paired_visit_heights()
         self._reposition_columns()
 
     def set_extra_time_minutes(self, minutes: int):
         self._extra_time_minutes = max(0, int(minutes))
         for col in self._column_items:
             col.set_extra_time_minutes(self._extra_time_minutes)
+        self._normalize_paired_visit_heights()
         self._reposition_columns()
 
     def apply_filter(self, active_tags: set[str], mode: str = "or"):
@@ -397,6 +404,41 @@ class RouteScene(QGraphicsScene):
             self.route_notes_changed.emit(col.route.id, text)
             col.refresh_header()
             self._reposition_columns()
+
+    def _normalize_paired_visit_heights(self):
+        visit_items_by_visit_id: dict[int, object] = {}
+        for col in self._column_items:
+            for visit_item in col.visit_items():
+                visit_id = visit_item.entry.visit_id
+                if visit_id is not None:
+                    visit_items_by_visit_id[visit_id] = visit_item
+
+        handled_visit_ids: set[int] = set()
+        for visit_id, visit_item in visit_items_by_visit_id.items():
+            if visit_id in handled_visit_ids:
+                continue
+
+            visit = visit_item.entry.visit
+            partner_id = visit.pair_partner_id if visit else None
+            if not partner_id:
+                visit_item.set_height_override(None)
+                handled_visit_ids.add(visit_id)
+                continue
+
+            partner_item = visit_items_by_visit_id.get(partner_id)
+            if not partner_item:
+                visit_item.set_height_override(None)
+                handled_visit_ids.add(visit_id)
+                continue
+
+            equal_height = max(visit_item.natural_height(), partner_item.natural_height())
+            visit_item.set_height_override(equal_height)
+            partner_item.set_height_override(equal_height)
+            handled_visit_ids.add(visit_id)
+            handled_visit_ids.add(partner_id)
+
+        for col in self._column_items:
+            col.relayout_items(animate=False)
 
     def _reposition_columns(self, animate: bool = False):
         self._normalize_route_orders()

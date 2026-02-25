@@ -1640,6 +1640,8 @@ class MainWindow(QMainWindow):
         if from_failed_fallback:
             self._failed_fallback_keys.discard(key)
 
+        any_route_changed = False
+
         for route in self._routes.values():
             changed = False
             for seg in route.travel_segments:
@@ -1666,9 +1668,12 @@ class MainWindow(QMainWindow):
                         seg.travel_time_state = TravelTimeState.CALCULATED
                     changed = True
             if changed:
+                any_route_changed = True
                 self._recalc.recalculate(route)
                 self._route_scene.rebuild_route(route)
                 self._autosave.mark_dirty(route.id)
+        if any_route_changed:
+            self._apply_pair_synchronization_and_refresh(max_passes=6)
         if self._settings.debug_mode:
             self._run_debug_integrity_scan("travel_time_ready", log_result=False)
 
@@ -2992,27 +2997,16 @@ class MainWindow(QMainWindow):
         if not route_a or not entry_a or not route_b or not entry_b:
             return set()
 
-        start_a = _t2m(entry_a.start_time)
-        start_b = _t2m(entry_b.start_time)
-        if start_a == start_b:
-            return set()
-
-        if start_a < start_b:
-            early_route, early_entry, early_start = route_a, entry_a, start_a
-            late_route, late_entry, late_start = route_b, entry_b, start_b
-        else:
-            early_route, early_entry, early_start = route_b, entry_b, start_b
-            late_route, late_entry, late_start = route_a, entry_a, start_a
-
         changed_routes: set[int] = set()
 
-        late_earliest = self._pair_earliest_start(late_route, late_entry)
-        if early_start >= late_earliest:
-            if self._set_entry_start_with_gap(late_route, late_entry, early_start):
-                changed_routes.add(late_route.id)
-        else:
-            if self._set_entry_start_with_gap(early_route, early_entry, late_start):
-                changed_routes.add(early_route.id)
+        earliest_a = self._pair_earliest_start(route_a, entry_a)
+        earliest_b = self._pair_earliest_start(route_b, entry_b)
+        target_start = max(earliest_a, earliest_b)
+
+        if self._set_entry_start_with_gap(route_a, entry_a, target_start):
+            changed_routes.add(route_a.id)
+        if self._set_entry_start_with_gap(route_b, entry_b, target_start):
+            changed_routes.add(route_b.id)
 
         return changed_routes
 
@@ -3048,7 +3042,7 @@ class MainWindow(QMainWindow):
         for changed_route_id in changed_route_ids:
             changed_route = self._routes.get(changed_route_id)
             if changed_route:
-                self._route_scene.rebuild_route(changed_route)
+                self._route_scene.rebuild_route(changed_route, animate=False)
                 self._autosave.mark_dirty(changed_route_id)
 
     # ------------------------------------------------------------------

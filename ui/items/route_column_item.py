@@ -117,6 +117,12 @@ class RouteColumnItem(QGraphicsObject):
     def route(self) -> Route:
         return self._route
 
+    def visit_items(self) -> list[VisitItem]:
+        return list(self._visit_items)
+
+    def relayout_items(self, animate: bool = False):
+        self._layout_children(animate=animate)
+
     def column_width(self) -> int:
         from controllers.route_layout_engine import _scaled
         if self._is_collapsed:

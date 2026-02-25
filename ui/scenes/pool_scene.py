@@ -86,6 +86,7 @@ class PoolScene(QGraphicsScene):
             self._column_items.append(col)
 
         self._normalize_column_orders()
+        self._normalize_paired_visit_heights()
 
         self._reposition()
 
@@ -103,6 +104,7 @@ class PoolScene(QGraphicsScene):
             self._column_items.append(col)
             self._normalize_column_orders()
         self._saved_order_by_street[col.street] = getattr(col, "_display_order", 0)
+        self._normalize_paired_visit_heights()
         self._reposition(animate)
 
     def remove_visit(self, visit_id: int):
@@ -113,6 +115,7 @@ class PoolScene(QGraphicsScene):
                     col.remove_visit(visit_id)
                     if not col.visits:
                         col.setVisible(False)
+                    self._normalize_paired_visit_heights()
                     self._reposition()
                     return
 
@@ -123,6 +126,7 @@ class PoolScene(QGraphicsScene):
             self._extra_time_template.set_font_size(size)
         for col in self._column_items:
             col.set_font_size(size)
+        self._normalize_paired_visit_heights()
         self._reposition()
 
     def set_extra_time_minutes(self, minutes: int):
@@ -147,7 +151,43 @@ class PoolScene(QGraphicsScene):
             if col.street in self._saved_order_by_street:
                 col._display_order = self._saved_order_by_street[col.street]
         self._normalize_column_orders()
+        self._normalize_paired_visit_heights()
         self._reposition()
+
+    def _normalize_paired_visit_heights(self):
+        visit_items_by_visit_id: dict[int, object] = {}
+        for col in self._column_items:
+            for visit_item in col.visit_items():
+                visit_id = visit_item.entry.visit_id
+                if visit_id is not None:
+                    visit_items_by_visit_id[visit_id] = visit_item
+
+        handled_visit_ids: set[int] = set()
+        for visit_id, visit_item in visit_items_by_visit_id.items():
+            if visit_id in handled_visit_ids:
+                continue
+
+            visit = visit_item.entry.visit
+            partner_id = visit.pair_partner_id if visit else None
+            if not partner_id:
+                visit_item.set_height_override(None)
+                handled_visit_ids.add(visit_id)
+                continue
+
+            partner_item = visit_items_by_visit_id.get(partner_id)
+            if not partner_item:
+                visit_item.set_height_override(None)
+                handled_visit_ids.add(visit_id)
+                continue
+
+            equal_height = max(visit_item.natural_height(), partner_item.natural_height())
+            visit_item.set_height_override(equal_height)
+            partner_item.set_height_override(equal_height)
+            handled_visit_ids.add(visit_id)
+            handled_visit_ids.add(partner_id)
+
+        for col in self._column_items:
+            col.relayout_items()
 
     def column_order_pairs(self) -> list[tuple[str, int]]:
         return [(col.street, int(getattr(col, "_display_order", idx))) for idx, col in enumerate(self._ordered_columns())]

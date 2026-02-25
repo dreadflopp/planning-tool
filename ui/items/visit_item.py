@@ -90,8 +90,9 @@ class VisitItem(QGraphicsObject):
         self._pending_pop_bundle_height: Optional[int] = None
         self._hover_action: Optional[str] = None
         self._drag_start: Optional[QPointF] = None
+        self._height_override: Optional[int] = None
         self.setAcceptHoverEvents(True)
-        self.setCacheMode(QGraphicsObject.CacheMode.DeviceCoordinateCache)
+        self.setCacheMode(QGraphicsObject.CacheMode.NoCache)
 
     @classmethod
     def set_color_palette(cls, palette: dict[str, str]):
@@ -184,7 +185,7 @@ class VisitItem(QGraphicsObject):
 
     def _text_col_width(self) -> int:
         w = self.width()
-        controls_w = (_COL2_W + _COL3_W + (_COL4_W if self._in_route else 0))
+        controls_w = (_COL2_W + _COL3_W + _COL4_W) if self._in_route else 0
         return max(80, w - controls_w - (_COLOR_STRIP_W + _PAD * 3))
 
     def _wrapped_height(self, text: str, font: QFont, width: int, min_h: int = 0) -> int:
@@ -194,7 +195,7 @@ class VisitItem(QGraphicsObject):
         rect = metrics.boundingRect(0, 0, width, 500, int(Qt.TextFlag.TextWordWrap), text)
         return max(min_h, rect.height())
 
-    def height(self) -> int:
+    def natural_height(self) -> int:
         from controllers.route_layout_engine import _scaled
         base = _scaled(VISIT_HEIGHT, self._font_size)
         fs = self._font_size
@@ -203,6 +204,19 @@ class VisitItem(QGraphicsObject):
         ins_h = self._wrapped_height(self._entry.display_insatser, QFont("Segoe UI", max(fs - 3, 7)), text_w, min_h=0)
         dynamic = _PAD + name_h + max(fs + 6, 14) + max(fs + 6, 14) + (ins_h if ins_h > 0 else 0) + _PAD
         return max(base, dynamic)
+
+    def set_height_override(self, height: Optional[int]):
+        normalized = None if height is None else max(0, int(height))
+        if self._height_override == normalized:
+            return
+        self.prepareGeometryChange()
+        self._height_override = normalized
+        self.update()
+
+    def height(self) -> int:
+        if self._height_override is not None:
+            return self._height_override
+        return self.natural_height()
 
     def width(self) -> int:
         from controllers.route_layout_engine import _scaled
