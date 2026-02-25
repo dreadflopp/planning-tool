@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt, Slot, QTimer, QRectF
 from PySide6.QtGui import QAction, QColor, QFont, QPageLayout, QPageSize, QPainter, QPdfWriter, QPen
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QLabel, QSpinBox, QComboBox, QPushButton, QToolButton,
+    QLabel, QSpinBox, QComboBox, QPushButton, QToolButton, QMenu,
     QScrollArea, QFileDialog, QMessageBox, QInputDialog, QDialog,
     QGroupBox, QScrollBar, QSizePolicy, QFormLayout, QDialogButtonBox, QLineEdit,
 )
@@ -391,6 +391,7 @@ class MainWindow(QMainWindow):
 
         # Filter bar – wraps to multiple rows as needed
         self._filter_bar = QWidget()
+        self._filter_bar.setObjectName("filterBar")
         self._filter_bar.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
@@ -463,33 +464,12 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self, parent_layout: QVBoxLayout):
         self._command_bar = QWidget(self)
+        self._command_bar.setObjectName("commandBar")
         self._command_bar.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         self._command_flow = FlowLayout(self._command_bar, h_spacing=6, v_spacing=4)
         self._command_flow.setContentsMargins(4, 2, 4, 2)
-        self._command_bar.setStyleSheet(
-            """
-            QToolButton {
-                min-height: 28px;
-                padding: 4px 10px;
-                border: 1px solid #B8BEC5;
-                border-radius: 6px;
-                background: #F7F8FA;
-            }
-            QToolButton:hover {
-                background: #EFF3F8;
-                border-color: #A8AFB7;
-            }
-            QToolButton:pressed {
-                background: #E5EBF2;
-            }
-            QToolButton:checked {
-                background: #DCEAF7;
-                border-color: #8DAFD2;
-            }
-            """
-        )
         parent_layout.addWidget(self._command_bar, 0)
 
         def _add_action_button(action: QAction):
@@ -499,25 +479,31 @@ class MainWindow(QMainWindow):
             self._command_flow.addWidget(btn)
 
         # Planfil
-        act_import_state = QAction("Öppna planering", self)
+        act_import_state = QAction("Öppna", self)
         act_import_state.triggered.connect(self._on_import_state)
         _add_action_button(act_import_state)
 
-        act_export_state = QAction("Spara planering", self)
+        act_export_state = QAction("Spara", self)
         act_export_state.triggered.connect(self._on_export_state)
         _add_action_button(act_export_state)
 
-        act_import = QAction("Importera Excel", self)
+        act_import = QAction("Importera", self)
         act_import.triggered.connect(self._on_import_excel)
         _add_action_button(act_import)
 
-        act_export_excel = QAction("Exportera Excel", self)
-        act_export_excel.triggered.connect(self._on_export_excel)
-        _add_action_button(act_export_excel)
-
-        act_export_pdf = QAction("Exportera PDF", self)
-        act_export_pdf.triggered.connect(self._on_export_pdf)
-        _add_action_button(act_export_pdf)
+        self._export_action_excel = QAction("Excel", self)
+        self._export_action_excel.triggered.connect(self._on_export_excel)
+        self._export_action_pdf = QAction("PDF", self)
+        self._export_action_pdf.triggered.connect(self._on_export_pdf)
+        self._export_menu = QMenu(self._command_bar)
+        self._export_menu.addAction(self._export_action_excel)
+        self._export_menu.addAction(self._export_action_pdf)
+        self._export_button = QToolButton(self._command_bar)
+        self._export_button.setText("Exportera ▾")
+        self._export_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._export_button.setMenu(self._export_menu)
+        self._export_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._command_flow.addWidget(self._export_button)
 
         # Planering
         act_add_route = QAction("＋ Ny rutt", self)
@@ -686,6 +672,7 @@ class MainWindow(QMainWindow):
         self._pool_scene.visit_selected.connect(self._on_pool_visit_selected)
         self._pool_scene.visit_pair_requested.connect(self._on_pool_visit_pair_requested)
         self._pool_scene.visit_unpair_requested.connect(self._on_pool_visit_unpair_requested)
+        self._pool_scene.template_edit_requested.connect(self._on_template_edit_requested)
 
     # ------------------------------------------------------------------
     # Data loading
@@ -1025,6 +1012,7 @@ class MainWindow(QMainWindow):
                 self._settings.default_travel_mode,
                 insert_index=insert_index,
             )
+            self._request_travel_for_new_entry(route, entry)
             self._route_scene.rebuild_route(route)
             if insert_index is not None:
                 self._route_scene.pop_visit(route_id, visit_index=int(insert_index))
@@ -1274,6 +1262,14 @@ class MainWindow(QMainWindow):
         duration_spin.setRange(1, 720)
         duration_spin.setValue(current_duration)
         duration_spin.setSuffix(" min")
+        office_name_edit: Optional[QLineEdit] = None
+        office_address_edit: Optional[QLineEdit] = None
+
+        if entry.is_office_instance:
+            office_name_edit = QLineEdit(entry.office_name or "Kontor", dlg)
+            office_address_edit = QLineEdit(entry.office_address or "", dlg)
+            form.addRow("Namn:", office_name_edit)
+            form.addRow("Adress:", office_address_edit)
 
         form.addRow("Starttid (HH:MM):", start_edit)
         form.addRow("Duration:", duration_spin)
@@ -1287,6 +1283,20 @@ class MainWindow(QMainWindow):
 
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+
+        office_identity_changed = False
+        pending_office_name = ""
+        pending_office_address = ""
+        if entry.is_office_instance:
+            pending_office_name = (office_name_edit.text() if office_name_edit else "").strip() or "Kontor"
+            pending_office_address = (office_address_edit.text() if office_address_edit else "").strip()
+            if not pending_office_address:
+                QMessageBox.warning(self, "Ogiltig adress", "Adress kan inte vara tom för standardbesök.")
+                return
+            office_identity_changed = (
+                pending_office_name != (entry.office_name or "") or
+                pending_office_address != (entry.office_address or "")
+            )
 
         import re
         text = start_edit.text().strip()
@@ -1318,6 +1328,9 @@ class MainWindow(QMainWindow):
         duration = duration_spin.value()
         old_start = _t2m(entry.start_time)
         old_end = _t2m(entry.end_time)
+        if entry.is_office_instance:
+            entry.office_name = pending_office_name
+            entry.office_address = pending_office_address
         entry.start_time = _m2t(new_start)
         entry.end_time = _m2t(new_start + duration)
 
@@ -1349,6 +1362,10 @@ class MainWindow(QMainWindow):
 
         self._recalc.recalculate(route)
         self._route_scene.rebuild_route(route)
+        if entry.is_office_instance:
+            self._db.update_route_entry(entry)
+            if office_identity_changed:
+                self._request_travel_for_new_entry(route, entry)
         self._autosave.mark_dirty(route.id)
         self._apply_pair_synchronization_and_refresh(max_passes=6)
 
@@ -2720,6 +2737,70 @@ class MainWindow(QMainWindow):
     def _on_pool_visit_unpair_requested(self, visit_id: int):
         """Handle unpair request from pool visit."""
         self._unpair_visit(visit_id)
+
+    @Slot(int)
+    def _on_template_edit_requested(self, template_index: int):
+        if template_index < 0 or template_index >= len(self._default_templates):
+            return
+
+        template = self._default_templates[template_index]
+        if template.get("type") == "extra_time":
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Redigera standardbesök")
+        form = QFormLayout(dlg)
+
+        name_edit = QLineEdit(str(template.get("name", "Kontor")), dlg)
+        address_edit = QLineEdit(str(template.get("address", "")), dlg)
+        duration_spin = QSpinBox(dlg)
+        duration_spin.setRange(1, 720)
+        duration_spin.setValue(max(1, int(template.get("duration_minutes", 10))))
+        duration_spin.setSuffix(" min")
+
+        form.addRow("Namn:", name_edit)
+        form.addRow("Adress:", address_edit)
+        form.addRow("Duration:", duration_spin)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dlg,
+        )
+        form.addRow(buttons)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        name_value = (name_edit.text() or "").strip() or "Kontor"
+        address_value = (address_edit.text() or "").strip()
+        if not address_value:
+            QMessageBox.warning(self, "Ogiltig adress", "Adress kan inte vara tom.")
+            return
+
+        template["name"] = name_value
+        template["address"] = address_value
+        template["duration_minutes"] = int(duration_spin.value())
+
+        placed: set[int] = set()
+        for route in self._routes.values():
+            for entry in route.entries:
+                if entry.visit_id:
+                    placed.add(entry.visit_id)
+        pool_visits = [v for v in self._visits.values() if v.id not in placed]
+        pool_order = {street: order for street, order in self._pool_scene.column_order_pairs()}
+        self._pool_scene.load(self._default_templates, pool_visits)
+        self._pool_scene.set_column_order_map(pool_order)
+        self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
+        self._apply_filters_and_search()
+        self._sync_map_window_visits()
+
+        if self._api_key and address_value:
+            try:
+                MapGeocodingService(self._db, self._api_key).precache_addresses([address_value])
+            except Exception:
+                pass
 
     def _show_pair_dialog(self, visit_id: int):
         """Show dialog to pair visit with another visit."""

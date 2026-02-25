@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Qt, QRectF, QPointF
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QDrag, QPixmap
 from PySide6.QtWidgets import QGraphicsObject, QGraphicsSceneMouseEvent
 
@@ -22,15 +22,20 @@ class OfficeTemplateItem(QGraphicsObject):
     Drag it to a route to create a default office-type visit instance.
     """
 
+    edit_requested = Signal(int)
+
     def __init__(self, name: str, full_address: str, duration_minutes: int,
-                 font_size: int = 12, parent=None):
+                 template_index: int = -1, font_size: int = 12, parent=None):
         super().__init__(parent)
         self._name = name
         self._full_address = full_address
         self._duration = max(1, duration_minutes)
+        self._template_index = int(template_index)
         self._font_size = font_size
         self._drag_start: QPointF | None = None
         self.setAcceptHoverEvents(True)
+        if self._template_index >= 0:
+            self.setToolTip("Dra för att placera. Högerklicka för att redigera.")
 
     @staticmethod
     def _display_address(full_address: str) -> str:
@@ -111,6 +116,10 @@ class OfficeTemplateItem(QGraphicsObject):
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
         self._drag_start = None
+        if event.button() == Qt.MouseButton.RightButton and self._template_index >= 0:
+            self.edit_requested.emit(self._template_index)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def _start_drag(self, event: QGraphicsSceneMouseEvent):

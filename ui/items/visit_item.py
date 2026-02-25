@@ -280,7 +280,7 @@ class VisitItem(QGraphicsObject):
                          self._entry.display_name)
         y += name_h
 
-        small_font = QFont("Segoe UI", max(fs - 2, 7))
+        small_font = QFont("Segoe UI", max(fs - 2, 7), QFont.Weight.DemiBold)
         painter.setFont(small_font)
 
         from controllers.route_recalculation_engine import _display_time
