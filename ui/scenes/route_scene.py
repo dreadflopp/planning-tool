@@ -6,7 +6,7 @@ import json
 from typing import Optional, TYPE_CHECKING
 
 import shiboken6
-from PySide6.QtCore import Qt, QPointF, Signal
+from PySide6.QtCore import Qt, QPointF, Signal, QTimer
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsSceneMouseEvent, QGraphicsLineItem, QInputDialog
 
@@ -64,6 +64,9 @@ class RouteScene(QGraphicsScene):
         self._inconsistent_entry_ids_by_route: dict[int, set[int]] = {}
         self._inconsistent_travel_pairs_by_route: dict[int, set[tuple[int, int]]] = {}
         self._inconsistent_empty_pairs_by_route: dict[int, set[tuple[int, int]]] = {}
+        self._shift_relayout_timer = QTimer(self)
+        self._shift_relayout_timer.setSingleShot(True)
+        self._shift_relayout_timer.timeout.connect(self._apply_shift_relayout)
         self.setBackgroundBrush(QColor("#E0E0E0"))
 
     # ------------------------------------------------------------------
@@ -359,7 +362,10 @@ class RouteScene(QGraphicsScene):
         col.route_color_requested.connect(
             lambda c, color: self.route_color_changed.emit(c.route.id, color))
         col.route_shift_blocks_changed.connect(
-            lambda c, blocks: self.route_shift_blocks_changed.emit(c.route.id, blocks))
+            lambda c, blocks: (
+                self._schedule_shift_relayout(),
+                self.route_shift_blocks_changed.emit(c.route.id, blocks),
+            ))
         col.delete_requested.connect(
             lambda c: self.route_delete_requested.emit(c.route.id))
         col.entry_move_up.connect(
@@ -634,6 +640,12 @@ class RouteScene(QGraphicsScene):
     def _normalize_route_orders(self):
         for order, col in enumerate(self._ordered_columns()):
             col.route.display_order = order
+
+    def _schedule_shift_relayout(self):
+        self._shift_relayout_timer.start(25)
+
+    def _apply_shift_relayout(self):
+        self._reposition_columns(animate=False)
 
     def _show_drop_indicator(self, x: float, y: float, w: float):
         if self._drop_indicator is not None and not shiboken6.isValid(self._drop_indicator):

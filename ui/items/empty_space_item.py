@@ -1,4 +1,4 @@
-"""EmptySpaceItem – blue free-time block between travel end and next visit."""
+"""EmptySpaceItem – visual free-time block between travel end and next visit."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ _REMOVE_H_FACTOR = 0.42
 
 
 class EmptySpaceItem(QGraphicsObject):
-    """Blue block showing unused time in a route."""
+    """Block showing unused time in a route."""
 
     remove_requested = Signal(object)
 
@@ -68,7 +68,7 @@ class EmptySpaceItem(QGraphicsObject):
         painter.drawRect(1, 1, w - 2, h - 2)
 
         painter.setFont(QFont("Segoe UI", max(fs - 3, 7), QFont.Weight.Bold))
-        painter.setPen(QColor("#0D47A1"))
+        painter.setPen(QColor("#8E0000"))
         label = f"Lucka: {self._space.duration_minutes} min"
         painter.drawText(QRectF(_PAD, 0, w - 44, h),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -77,7 +77,7 @@ class EmptySpaceItem(QGraphicsObject):
         remove_h = h * _REMOVE_H_FACTOR
         remove_y = (h - remove_h) / 2
         remove_rect = QRectF(w - _PAD - _REMOVE_W, remove_y, _REMOVE_W, remove_h)
-        painter.setPen(QPen(QColor("#0D47A1"), 1))
+        painter.setPen(QPen(QColor("#8E0000"), 1))
         painter.drawRoundedRect(remove_rect, 3, 3)
         painter.setFont(QFont("Segoe UI", max(fs - 4, 6), QFont.Weight.Bold))
         painter.drawText(remove_rect, Qt.AlignmentFlag.AlignCenter, "✕")

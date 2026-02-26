@@ -1167,6 +1167,7 @@ class MainWindow(QMainWindow):
     def _remove_entry_to_pool(self, route: Route, entry: RouteEntry):
         if not entry.visit_id or entry.visit_id not in self._visits:
             return
+        had_single_entry = len(route.entries) <= 1
         v = self._visits[entry.visit_id]
         v_restored = Visit(
             id=v.id, object_id=v.object_id, name=v.name,
@@ -1177,6 +1178,10 @@ class MainWindow(QMainWindow):
             pair_partner_id=self._pairs.get(v.id),
         )
         self._recalc.remove_entry_from_route(route, entry, replace_with_empty=True)
+        if had_single_entry:
+            self._rebuild_all_views()
+            self._autosave.mark_dirty(route.id)
+            return
         self._pool_scene.add_visit(v_restored)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route.id)
@@ -1405,12 +1410,22 @@ class MainWindow(QMainWindow):
                              include_anchor=False)
 
         self._recalc.recalculate(route)
-        self._route_scene.rebuild_route(route)
+        pair_changed_route_ids: set[int] = set()
+        if entry.visit_id and self._pairs.get(entry.visit_id):
+            pair_changed_route_ids = self._align_pair_to_start(entry.visit_id, new_start)
+
+        rebuild_route_ids = {route.id}
+        rebuild_route_ids.update(pair_changed_route_ids)
+        for rebuild_route_id in rebuild_route_ids:
+            rebuild_route = self._routes.get(rebuild_route_id)
+            if rebuild_route:
+                self._route_scene.rebuild_route(rebuild_route)
         if entry.is_office_instance:
             self._db.update_route_entry(entry)
             if office_identity_changed:
                 self._request_travel_for_new_entry(route, entry)
-        self._autosave.mark_dirty(route.id)
+        for dirty_route_id in rebuild_route_ids:
+            self._autosave.mark_dirty(dirty_route_id)
         self._apply_pair_synchronization_and_refresh(max_passes=6)
 
     @Slot(int, int, int)
@@ -3084,11 +3099,37 @@ class MainWindow(QMainWindow):
 
         earliest_a = self._pair_earliest_start(route_a, entry_a)
         earliest_b = self._pair_earliest_start(route_b, entry_b)
-        target_start = max(earliest_a, earliest_b)
+        current_a = _t2m(entry_a.start_time)
+        current_b = _t2m(entry_b.start_time)
+        target_start = max(earliest_a, earliest_b, current_a, current_b)
 
         if self._set_entry_start_with_gap(route_a, entry_a, target_start):
             changed_routes.add(route_a.id)
         if self._set_entry_start_with_gap(route_b, entry_b, target_start):
+            changed_routes.add(route_b.id)
+
+        return changed_routes
+
+    def _align_pair_to_start(self, visit_id: int, target_start: int) -> set[int]:
+        partner_id = self._pairs.get(visit_id)
+        if not partner_id:
+            return set()
+
+        route_a, entry_a = self._find_route_entry_by_visit(visit_id)
+        route_b, entry_b = self._find_route_entry_by_visit(partner_id)
+        if not route_a or not entry_a or not route_b or not entry_b:
+            return set()
+
+        changed_routes: set[int] = set()
+        resolved_target = max(
+            int(target_start),
+            self._pair_earliest_start(route_a, entry_a),
+            self._pair_earliest_start(route_b, entry_b),
+        )
+
+        if self._set_entry_start_with_gap(route_a, entry_a, resolved_target):
+            changed_routes.add(route_a.id)
+        if self._set_entry_start_with_gap(route_b, entry_b, resolved_target):
             changed_routes.add(route_b.id)
 
         return changed_routes
