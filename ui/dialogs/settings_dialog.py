@@ -1,4 +1,4 @@
-"""Settings dialog – API key, default travel times, font size, minimum time."""
+"""Settings dialog – API key, travel defaults, colors and diagnostics."""
 
 from __future__ import annotations
 
@@ -100,11 +100,9 @@ class SettingsDialog(QDialog):
         view_tab = QWidget()
         view_form = QFormLayout(view_tab)
 
-        self._font_spin = QSpinBox()
-        self._font_spin.setRange(8, 24)
-        self._font_spin.setValue(settings.font_size)
-        self._font_spin.setSuffix(" pt")
-        view_form.addRow("Textstorlek:", self._font_spin)
+        self._scale_info = QLabel("Skalning justeras i verktygsfältet (Skala %).")
+        self._scale_info.setWordWrap(True)
+        view_form.addRow("Skala:", self._scale_info)
 
         self._debug_checkbox = QCheckBox("Aktivera debugläge")
         self._debug_checkbox.setChecked(bool(settings.debug_mode))
@@ -207,7 +205,6 @@ class SettingsDialog(QDialog):
         s.default_travel_walk = self._walk_spin.value()
         s.default_travel_mode = self._mode_combo.currentData()
         s.minimum_time_between_visits = self._min_time_spin.value()
-        s.font_size = self._font_spin.value()
         s.api_usage_limit = self._api_limit_spin.value()
         s.debug_mode = self._debug_checkbox.isChecked()
         s.file_logging_enabled = self._file_logging_checkbox.isChecked()

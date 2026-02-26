@@ -83,6 +83,7 @@ class RouteRecalculationEngine:
         """
         entries = route.sorted_entries()
         if len(entries) < 2:
+            self._prune_stale(route, entries)
             self._persist(route)
             return
 

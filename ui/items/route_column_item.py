@@ -25,9 +25,12 @@ if TYPE_CHECKING:
 
 _BTN_W = 26
 _BTN_H = 22
+_BTN_GAP = 4
 _PAD = 6
 _TOP_ROW_H = _BTN_H + _PAD * 2
 _TITLE_ROW_BASE_H = 24
+_SHIFT_BLOCKS_MIN = 0
+_SHIFT_BLOCKS_MAX = 120
 _ROUTE_COLOR_HEX = {
     "green": COLOR_VISIT_GREEN,
     "pink": COLOR_VISIT_PINK,
@@ -63,6 +66,7 @@ class RouteColumnItem(QGraphicsObject):
     notes_requested = Signal(object)
     delete_requested = Signal(object)
     route_color_requested = Signal(object, object)  # (column_item, color|None)
+    route_shift_blocks_changed = Signal(object, int)  # (column_item, shift_blocks)
 
     # Forwarded from children
     entry_move_up = Signal(object, object)       # (column_item, visit_item)
@@ -100,6 +104,9 @@ class RouteColumnItem(QGraphicsObject):
         self._inconsistent_entry_ids: set[int] = set()
         self._inconsistent_travel_pairs: set[tuple[int, int]] = set()
         self._inconsistent_empty_pairs: set[tuple[int, int]] = set()
+        self._pair_alignment_enabled = False
+        self._pair_target_y_by_visit_id: dict[int, float] = {}
+        self._pair_gap_lines: list[tuple[float, float]] = []
         self._visit_items: list[VisitItem] = []
         self._travel_items: list[TravelItem] = []
         self._empty_items: list[EmptySpaceItem] = []
@@ -116,6 +123,27 @@ class RouteColumnItem(QGraphicsObject):
     @property
     def route(self) -> Route:
         return self._route
+
+    def visit_items(self) -> list[VisitItem]:
+        return list(self._visit_items)
+
+    def relayout_items(self, animate: bool = False):
+        self._layout_children(animate=animate)
+
+    def set_pair_alignment(self, enabled: bool, target_y_by_visit_id: dict[int, float]):
+        enabled_bool = bool(enabled)
+        new_targets = (
+            {int(visit_id): float(y) for visit_id, y in (target_y_by_visit_id or {}).items()}
+            if enabled_bool
+            else {}
+        )
+        if (self._pair_alignment_enabled == enabled_bool and
+                self._pair_target_y_by_visit_id == new_targets):
+            return
+        self._pair_alignment_enabled = enabled_bool
+        self._pair_target_y_by_visit_id = new_targets
+        self._layout_children(animate=False)
+        self.update()
 
     def column_width(self) -> int:
         from controllers.route_layout_engine import _scaled
@@ -139,6 +167,40 @@ class RouteColumnItem(QGraphicsObject):
     def _name_rect(self, w: float) -> QRectF:
         title_y = _TOP_ROW_H
         return QRectF(_PAD, title_y, w - _PAD * 2, self._title_row_height())
+
+    def _shift_spinner_rect(self, w: float) -> QRectF:
+        from controllers.route_layout_engine import _scaled
+        btn_w = max(float(_BTN_W), float(_scaled(88, self._font_size)))
+        x = _PAD + _BTN_W + _BTN_GAP
+        y = _PAD
+        return QRectF(x, y, btn_w, _BTN_H)
+
+    def _shift_spinner_segments(self, w: float) -> tuple[QRectF, QRectF, QRectF]:
+        rect = self._shift_spinner_rect(w)
+        side_w = max(20.0, min(28.0, rect.width() * 0.3))
+        dec_rect = QRectF(rect.x(), rect.y(), side_w, rect.height())
+        inc_rect = QRectF(rect.right() - side_w, rect.y(), side_w, rect.height())
+        val_rect = QRectF(dec_rect.right(), rect.y(), rect.width() - side_w * 2, rect.height())
+        return dec_rect, val_rect, inc_rect
+
+    def _standard_shift_block_pixels(self) -> float:
+        from controllers.route_layout_engine import _scaled
+        return float(_scaled(90, self._font_size))
+
+    def _route_shift_pixels(self) -> float:
+        blocks = max(0, int(self._route.vertical_shift_blocks or 0))
+        if blocks <= 0:
+            return 0.0
+        return float(blocks) * self._standard_shift_block_pixels()
+
+    def _set_route_shift_blocks(self, blocks: int):
+        new_blocks = max(_SHIFT_BLOCKS_MIN, min(_SHIFT_BLOCKS_MAX, int(blocks)))
+        if new_blocks == int(self._route.vertical_shift_blocks or 0):
+            return
+        self._route.vertical_shift_blocks = new_blocks
+        self._layout_children(animate=False)
+        self.update()
+        self.route_shift_blocks_changed.emit(self, new_blocks)
 
     def _notes_rect(self, w: float, hh: float) -> QRectF:
         y = _TOP_ROW_H + self._title_row_height()
@@ -172,7 +234,8 @@ class RouteColumnItem(QGraphicsObject):
         return r_start, r_left, r_right, r_end
 
     def total_height(self) -> int:
-        return self.header_height() + sum(i.height() for i in self._all_items) + _PAD * 2
+        extra = 0.0 if self._is_collapsed else self._route_shift_pixels()
+        return int(self.header_height() + extra + sum(i.height() for i in self._all_items) + _PAD * 2)
 
     def rebuild(self, animate: bool = False):
         """Rebuild child items from the route's current data and re-layout."""
@@ -304,28 +367,33 @@ class RouteColumnItem(QGraphicsObject):
     def drop_indicator_y(self, scene_y: float) -> float:
         """Return scene-Y for the drop indicator line given a scene drag position."""
         local_y = scene_y - self.scenePos().y()
-        hh = self.header_height()
-        y = hh + _PAD
+        if not self._all_items:
+            hh = self.header_height()
+            y0 = hh + _PAD + (0.0 if self._is_collapsed else self._route_shift_pixels())
+            return self.scenePos().y() + y0
+
         for item in self._all_items:
-            if local_y <= y + item.height() / 2:
-                return self.scenePos().y() + y
-            y += item.height()
-        return self.scenePos().y() + y
+            item_top = float(item.pos().y())
+            if local_y <= item_top + item.height() / 2:
+                return self.scenePos().y() + item_top
+
+        last_item = self._all_items[-1]
+        end_y = float(last_item.pos().y()) + float(last_item.height())
+        return self.scenePos().y() + end_y
 
     def insert_index_for_scene_y(self, scene_y: float) -> int:
         """Return route-entry insertion index for a given scene Y position."""
         local_y = scene_y - self.scenePos().y()
-        hh = self.header_height()
-        y = hh + _PAD
-        entries = self._route.sorted_entries()
+        visit_items = [item for item in self._all_items if isinstance(item, VisitItem)]
+        if not visit_items:
+            return 0
         visit_idx = 0
-        for item in self._all_items:
-            if isinstance(item, VisitItem):
-                if local_y <= y + item.height() / 2:
-                    return visit_idx
-                visit_idx += 1
-            y += item.height()
-        return len(entries)
+        for item in visit_items:
+            item_top = float(item.pos().y())
+            if local_y <= item_top + item.height() / 2:
+                return visit_idx
+            visit_idx += 1
+        return len(visit_items)
 
     def visit_item_for_entry(self, entry_id: int) -> Optional[VisitItem]:
         for vi in self._visit_items:
@@ -387,6 +455,21 @@ class RouteColumnItem(QGraphicsObject):
         collapse_char = "▼" if self._is_collapsed else "▶"
         painter.drawText(collapse_btn_rect, Qt.AlignmentFlag.AlignCenter, collapse_char)
 
+        shift_rect = self._shift_spinner_rect(w)
+        dec_rect, val_rect, inc_rect = self._shift_spinner_segments(w)
+        painter.setBrush(QBrush(QColor("#ECEFF1")))
+        painter.setPen(QPen(QColor("#90A4AE"), 1))
+        painter.drawRoundedRect(shift_rect, 3, 3)
+        painter.drawLine(dec_rect.right(), shift_rect.top() + 2, dec_rect.right(), shift_rect.bottom() - 2)
+        painter.drawLine(inc_rect.left(), shift_rect.top() + 2, inc_rect.left(), shift_rect.bottom() - 2)
+        painter.setPen(QColor("#455A64"))
+        shift_font = QFont("Segoe UI", max(fs - 3, 7), QFont.Weight.DemiBold)
+        painter.setFont(shift_font)
+        painter.drawText(dec_rect, Qt.AlignmentFlag.AlignCenter, "−")
+        shift_text = f"↓{max(0, int(self._route.vertical_shift_blocks or 0))}"
+        painter.drawText(val_rect, Qt.AlignmentFlag.AlignCenter, shift_text)
+        painter.drawText(inc_rect, Qt.AlignmentFlag.AlignCenter, "+")
+
         if self._is_collapsed:
             if self._column_has_search_match():
                 painter.setPen(QPen(QColor("#FF6F00"), 2))
@@ -416,6 +499,13 @@ class RouteColumnItem(QGraphicsObject):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
         # Header is intentionally two rows: buttons row + title row.
+
+        if self._pair_gap_lines:
+            painter.setPen(QPen(QColor("#000000"), 2))
+            center_x = w / 2.0
+            for y1, y2 in self._pair_gap_lines:
+                if y2 > y1:
+                    painter.drawLine(center_x, y1, center_x, y2)
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
         event.accept()
@@ -469,6 +559,17 @@ class RouteColumnItem(QGraphicsObject):
 
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mouseReleaseEvent(event)
+
+        shift_rect = self._shift_spinner_rect(w)
+        dec_rect, _val_rect, inc_rect = self._shift_spinner_segments(w)
+        if shift_rect.contains(pos):
+            current = max(_SHIFT_BLOCKS_MIN, min(_SHIFT_BLOCKS_MAX, int(self._route.vertical_shift_blocks or 0)))
+            if dec_rect.contains(pos):
+                self._set_route_shift_blocks(current - 1)
+            elif inc_rect.contains(pos):
+                self._set_route_shift_blocks(current + 1)
+            event.accept()
+            return
 
         if self._is_collapsed:
             # Skip move button processing when collapsed
@@ -638,7 +739,7 @@ class RouteColumnItem(QGraphicsObject):
 
     def _target_positions(self) -> dict[object, float]:
         hh = self.header_height()
-        y = hh + _PAD
+        y = hh + _PAD + self._route_shift_pixels()
         out: dict[object, float] = {}
         for item in self._all_items:
             out[item] = float(y)
@@ -722,8 +823,25 @@ class RouteColumnItem(QGraphicsObject):
 
     def _layout_children(self, animate: bool = False):
         hh = self.header_height()
-        y = hh + _PAD
+        y = float(hh + _PAD)
+        self._pair_gap_lines.clear()
+        route_shift = 0.0 if self._is_collapsed else self._route_shift_pixels()
+        if route_shift > 0.5:
+            self._pair_gap_lines.append((y, y + route_shift))
+            y += route_shift
         for item in self._all_items:
+            if self._pair_alignment_enabled and isinstance(item, VisitItem):
+                visit_id = item.entry.visit_id
+                target_y = (
+                    self._pair_target_y_by_visit_id.get(int(visit_id))
+                    if visit_id is not None
+                    else None
+                )
+                if target_y is not None:
+                    target_y = float(target_y)
+                    if target_y > y + 0.5:
+                        self._pair_gap_lines.append((y, target_y))
+                        y = target_y
             self._layout._move_item(item, QPointF(0, y), animate=animate)
             y += item.height()
         self.prepareGeometryChange()

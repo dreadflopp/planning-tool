@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS routes (
     name         TEXT    NOT NULL,
     notes        TEXT    NOT NULL DEFAULT '',
     display_order INTEGER NOT NULL DEFAULT 0,
-    route_color  TEXT
+    route_color  TEXT,
+    shift_blocks INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS route_visit_order (
@@ -197,6 +198,10 @@ class PersistenceService:
             self._conn.execute(
                 "ALTER TABLE routes ADD COLUMN route_color TEXT"
             )
+        if "shift_blocks" not in existing_routes_cols:
+            self._conn.execute(
+                "ALTER TABLE routes ADD COLUMN shift_blocks INTEGER NOT NULL DEFAULT 0"
+            )
 
         cur = self._conn.execute("PRAGMA table_info(extra_time_blocks)")
         if not cur.fetchall():
@@ -258,6 +263,8 @@ class PersistenceService:
 
     def load_settings(self) -> Settings:
         s = Settings()
+        loaded_font_size: Optional[int] = None
+        loaded_ui_scale = False
         cur = self._conn.execute("SELECT key, value FROM settings")
         for row in cur.fetchall():
             k, v = row["key"], row["value"]
@@ -271,8 +278,18 @@ class PersistenceService:
                 s.default_travel_mode = v
             elif k == "minimum_time_between_visits":
                 s.minimum_time_between_visits = int(v)
+            elif k == "ui_scale_percent":
+                try:
+                    s.ui_scale_percent = max(50, min(200, int(v)))
+                except Exception:
+                    s.ui_scale_percent = 100
+                loaded_ui_scale = True
             elif k == "font_size":
-                s.font_size = int(v)
+                try:
+                    loaded_font_size = int(v)
+                    s.font_size = loaded_font_size
+                except Exception:
+                    loaded_font_size = None
             elif k == "api_usage_count":
                 s.api_usage_count = int(v)
             elif k == "api_usage_limit":
@@ -287,6 +304,8 @@ class PersistenceService:
                 s.show_space_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
             elif k == "show_extra_time_blocks":
                 s.show_extra_time_blocks = str(v).strip().lower() in {"1", "true", "yes", "on"}
+            elif k == "align_pair_visits":
+                s.align_pair_visits = str(v).strip().lower() in {"1", "true", "yes", "on"}
             elif k == "debug_mode":
                 s.debug_mode = str(v).strip().lower() in {"1", "true", "yes", "on"}
             elif k == "file_logging_enabled":
@@ -310,16 +329,25 @@ class PersistenceService:
                 s.visit_color_yellow = str(v)
             elif k == "visit_color_black":
                 s.visit_color_black = str(v)
+
+        if not loaded_ui_scale and loaded_font_size is not None:
+            s.ui_scale_percent = max(50, min(200, int(round((loaded_font_size / 12.0) * 100))))
+        s.font_size = max(6, min(30, int(round(12 * s.ui_scale_percent / 100.0))))
         return s
 
     def save_settings(self, s: Settings):
+        scale_percent = max(50, min(200, int(s.ui_scale_percent)))
+        effective_font_size = max(6, min(30, int(round(12 * scale_percent / 100.0))))
+        s.ui_scale_percent = scale_percent
+        s.font_size = effective_font_size
         rows = [
             ("default_travel_car", str(s.default_travel_car)),
             ("default_travel_bike", str(s.default_travel_bike)),
             ("default_travel_walk", str(s.default_travel_walk)),
             ("default_travel_mode", s.default_travel_mode),
             ("minimum_time_between_visits", str(s.minimum_time_between_visits)),
-            ("font_size", str(s.font_size)),
+            ("ui_scale_percent", str(scale_percent)),
+            ("font_size", str(effective_font_size)),
             ("api_usage_count", str(s.api_usage_count)),
             ("api_usage_limit", str(s.api_usage_limit)),
             ("extra_time_minutes", str(s.extra_time_minutes)),
@@ -327,6 +355,7 @@ class PersistenceService:
             ("show_travel_blocks", "1" if s.show_travel_blocks else "0"),
             ("show_space_blocks", "1" if s.show_space_blocks else "0"),
             ("show_extra_time_blocks", "1" if s.show_extra_time_blocks else "0"),
+            ("align_pair_visits", "1" if s.align_pair_visits else "0"),
             ("debug_mode", "1" if s.debug_mode else "0"),
             ("file_logging_enabled", "1" if s.file_logging_enabled else "0"),
             ("file_logging_retention_days", str(max(1, int(s.file_logging_retention_days)))),
@@ -491,6 +520,7 @@ class PersistenceService:
             notes=row["notes"],
             display_order=row["display_order"],
             route_color=row["route_color"] if "route_color" in row.keys() else None,
+            vertical_shift_blocks=max(0, int(row["shift_blocks"])) if "shift_blocks" in row.keys() else 0,
         )
 
     def _load_entries_for_route(self, route_id: int, visits_by_id: dict) -> list[RouteEntry]:
@@ -555,16 +585,29 @@ class PersistenceService:
 
     def create_route(self, name: str, display_order: int) -> Route:
         cur = self._conn.execute(
-            "INSERT INTO routes(name, notes, display_order, route_color) VALUES (?, '', ?, NULL)",
+            "INSERT INTO routes(name, notes, display_order, route_color, shift_blocks) VALUES (?, '', ?, NULL, 0)",
             (name, display_order),
         )
         self._conn.commit()
-        return Route(id=cur.lastrowid, name=name, display_order=display_order, route_color=None)
+        return Route(
+            id=cur.lastrowid,
+            name=name,
+            display_order=display_order,
+            route_color=None,
+            vertical_shift_blocks=0,
+        )
 
     def save_route(self, route: Route):
         self._conn.execute(
-            "UPDATE routes SET name=?, notes=?, display_order=?, route_color=? WHERE id=?",
-            (route.name, route.notes, route.display_order, route.route_color, route.id),
+            "UPDATE routes SET name=?, notes=?, display_order=?, route_color=?, shift_blocks=? WHERE id=?",
+            (
+                route.name,
+                route.notes,
+                route.display_order,
+                route.route_color,
+                max(0, int(route.vertical_shift_blocks)),
+                route.id,
+            ),
         )
         self._conn.commit()
 
@@ -837,9 +880,10 @@ class PersistenceService:
             )
         for row in state.get("routes", []):
             row.setdefault("route_color", None)
+            row.setdefault("shift_blocks", 0)
             self._conn.execute(
-                "INSERT INTO routes(id,name,notes,display_order,route_color) "
-                "VALUES (:id,:name,:notes,:display_order,:route_color)",
+                "INSERT INTO routes(id,name,notes,display_order,route_color,shift_blocks) "
+                "VALUES (:id,:name,:notes,:display_order,:route_color,:shift_blocks)",
                 row,
             )
         for row in state.get("route_visit_order", []):

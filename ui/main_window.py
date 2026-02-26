@@ -114,6 +114,9 @@ class MainWindow(QMainWindow):
         # Services / controllers
         self._travel_svc = TravelTimeService(self._db, self._api_key, self._settings)
         self._recalc = RouteRecalculationEngine(self._db, self._travel_svc, self._settings)
+        initial_scale = max(50, min(200, int(getattr(self._settings, "ui_scale_percent", 100))))
+        self._settings.ui_scale_percent = initial_scale
+        self._settings.font_size = max(6, min(30, int(round(12 * initial_scale / 100.0))))
         self._layout_engine = RouteLayoutEngine(self._settings.font_size)
         self._autosave = AutoSaveManager(parent=self)
         self._autosave.save_requested.connect(self._on_autosave)
@@ -126,6 +129,7 @@ class MainWindow(QMainWindow):
         self._map_window: Optional[VisitMapWindow] = None
         self._selected_visit_id: Optional[int] = None
         self._global_search_query: str = ""
+        self._last_pair_alignment_conflict_count: int = 0
 
         # Paired visit index: visit_id → partner_visit_id
         self._pairs: dict[int, int] = {}
@@ -153,6 +157,7 @@ class MainWindow(QMainWindow):
             "_on_route_renamed",
             "_on_route_notes_changed",
             "_on_route_color_changed",
+            "_on_route_shift_blocks_changed",
             "_on_route_delete",
             "_on_entry_dropped",
             "_on_entry_returned",
@@ -170,11 +175,12 @@ class MainWindow(QMainWindow):
             "_on_travel_source_toggle",
             "_on_time_integrity",
             "_on_block_visibility_changed",
+            "_on_pair_alignment_toggled",
             "_on_extra_time_auto_toggled",
             "_on_extra_time_minutes_changed",
             "_on_reset_all",
             "_on_default_mode_changed",
-            "_on_font_size_changed",
+            "_on_ui_scale_percent_changed",
             "_on_import_excel",
             "_on_open_settings",
             "_on_export_state",
@@ -533,6 +539,12 @@ class MainWindow(QMainWindow):
         self._show_extra_time_action.toggled.connect(self._on_block_visibility_changed)
         _add_action_button(self._show_extra_time_action)
 
+        self._pair_align_action = QAction("Par-justera", self)
+        self._pair_align_action.setCheckable(True)
+        self._pair_align_action.setChecked(bool(self._settings.align_pair_visits))
+        self._pair_align_action.toggled.connect(self._on_pair_alignment_toggled)
+        _add_action_button(self._pair_align_action)
+
         # Sök
         self._search_toolbar_container = QWidget(self._command_bar)
         self._search_toolbar_container.setSizePolicy(
@@ -607,6 +619,27 @@ class MainWindow(QMainWindow):
         self._extra_time_toolbar_container.setMaximumWidth(210)
         self._command_flow.addWidget(self._extra_time_toolbar_container)
 
+        self._ui_scale_toolbar_container = QWidget(self._command_bar)
+        self._ui_scale_toolbar_container.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        scale_row = QHBoxLayout(self._ui_scale_toolbar_container)
+        scale_row.setContentsMargins(0, 0, 0, 0)
+        scale_row.setSpacing(4)
+        self._ui_scale_label = QLabel("Skala:")
+        scale_row.addWidget(self._ui_scale_label)
+        self._ui_scale_spin = QSpinBox()
+        self._ui_scale_spin.setRange(50, 200)
+        self._ui_scale_spin.setSingleStep(10)
+        self._ui_scale_spin.setSuffix(" %")
+        self._ui_scale_spin.setMinimumWidth(84)
+        self._ui_scale_spin.setMaximumWidth(96)
+        self._ui_scale_spin.setValue(max(50, min(200, int(self._settings.ui_scale_percent))))
+        self._ui_scale_spin.valueChanged.connect(self._on_ui_scale_percent_changed)
+        scale_row.addWidget(self._ui_scale_spin)
+        self._ui_scale_toolbar_container.setMaximumWidth(190)
+        self._command_flow.addWidget(self._ui_scale_toolbar_container)
+
         # System
         act_travel_log = QAction("API-logg", self)
         act_travel_log.triggered.connect(self._show_travel_status)
@@ -648,6 +681,7 @@ class MainWindow(QMainWindow):
         s.route_renamed.connect(self._on_route_renamed)
         s.route_notes_changed.connect(self._on_route_notes_changed)
         s.route_color_changed.connect(self._on_route_color_changed)
+        s.route_shift_blocks_changed.connect(self._on_route_shift_blocks_changed)
         s.route_delete_requested.connect(self._on_route_delete)
         s.entry_dropped.connect(self._on_entry_dropped)
         s.entry_moved.connect(self._on_entry_moved)
@@ -665,6 +699,7 @@ class MainWindow(QMainWindow):
         s.visit_selected.connect(self._on_route_visit_selected)
         s.entry_pair_requested.connect(self._on_route_entry_pair_requested)
         s.entry_unpair_requested.connect(self._on_route_entry_unpair_requested)
+        s.pair_alignment_conflicts_changed.connect(self._on_pair_alignment_conflicts_changed)
 
     def _wire_pool_scene(self):
         self._pool_scene.column_order_changed.connect(self._on_pool_column_order_changed)
@@ -713,6 +748,7 @@ class MainWindow(QMainWindow):
         self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._on_block_visibility_changed()
+        self._route_scene.set_pair_alignment_enabled(self._settings.align_pair_visits)
         self._apply_filters_and_search()
         self._sync_map_window_visits()
         self._sync_map_selection()
@@ -926,6 +962,14 @@ class MainWindow(QMainWindow):
         self._route_scene.rebuild_route(route, animate=False)
         self._autosave.mark_dirty(route_id)
 
+    @Slot(int, int)
+    def _on_route_shift_blocks_changed(self, route_id: int, blocks: int):
+        route = self._routes.get(route_id)
+        if not route:
+            return
+        route.vertical_shift_blocks = max(0, int(blocks))
+        self._autosave.mark_dirty(route_id)
+
     @Slot(int)
     def _on_route_delete(self, route_id: int):
         route = self._routes.get(route_id)
@@ -1123,6 +1167,7 @@ class MainWindow(QMainWindow):
     def _remove_entry_to_pool(self, route: Route, entry: RouteEntry):
         if not entry.visit_id or entry.visit_id not in self._visits:
             return
+        had_single_entry = len(route.entries) <= 1
         v = self._visits[entry.visit_id]
         v_restored = Visit(
             id=v.id, object_id=v.object_id, name=v.name,
@@ -1133,6 +1178,10 @@ class MainWindow(QMainWindow):
             pair_partner_id=self._pairs.get(v.id),
         )
         self._recalc.remove_entry_from_route(route, entry, replace_with_empty=True)
+        if had_single_entry:
+            self._rebuild_all_views()
+            self._autosave.mark_dirty(route.id)
+            return
         self._pool_scene.add_visit(v_restored)
         self._route_scene.rebuild_route(route)
         self._autosave.mark_dirty(route.id)
@@ -1361,12 +1410,22 @@ class MainWindow(QMainWindow):
                              include_anchor=False)
 
         self._recalc.recalculate(route)
-        self._route_scene.rebuild_route(route)
+        pair_changed_route_ids: set[int] = set()
+        if entry.visit_id and self._pairs.get(entry.visit_id):
+            pair_changed_route_ids = self._align_pair_to_start(entry.visit_id, new_start)
+
+        rebuild_route_ids = {route.id}
+        rebuild_route_ids.update(pair_changed_route_ids)
+        for rebuild_route_id in rebuild_route_ids:
+            rebuild_route = self._routes.get(rebuild_route_id)
+            if rebuild_route:
+                self._route_scene.rebuild_route(rebuild_route)
         if entry.is_office_instance:
             self._db.update_route_entry(entry)
             if office_identity_changed:
                 self._request_travel_for_new_entry(route, entry)
-        self._autosave.mark_dirty(route.id)
+        for dirty_route_id in rebuild_route_ids:
+            self._autosave.mark_dirty(dirty_route_id)
         self._apply_pair_synchronization_and_refresh(max_passes=6)
 
     @Slot(int, int, int)
@@ -1640,6 +1699,8 @@ class MainWindow(QMainWindow):
         if from_failed_fallback:
             self._failed_fallback_keys.discard(key)
 
+        any_route_changed = False
+
         for route in self._routes.values():
             changed = False
             for seg in route.travel_segments:
@@ -1666,9 +1727,12 @@ class MainWindow(QMainWindow):
                         seg.travel_time_state = TravelTimeState.CALCULATED
                     changed = True
             if changed:
+                any_route_changed = True
                 self._recalc.recalculate(route)
                 self._route_scene.rebuild_route(route)
                 self._autosave.mark_dirty(route.id)
+        if any_route_changed:
+            self._apply_pair_synchronization_and_refresh(max_passes=6)
         if self._settings.debug_mode:
             self._run_debug_integrity_scan("travel_time_ready", log_result=False)
 
@@ -1909,6 +1973,37 @@ class MainWindow(QMainWindow):
         self._autosave.mark_dirty()
 
     @Slot(bool)
+    def _on_pair_alignment_toggled(self, checked: bool):
+        self._settings.align_pair_visits = bool(checked)
+        self._route_scene.set_pair_alignment_enabled(self._settings.align_pair_visits)
+        if not self._settings.align_pair_visits:
+            self._last_pair_alignment_conflict_count = 0
+            self.statusBar().clearMessage()
+        self._autosave.mark_dirty()
+
+    @Slot(int)
+    def _on_pair_alignment_conflicts_changed(self, count: int):
+        conflict_count = max(0, int(count))
+        if conflict_count == self._last_pair_alignment_conflict_count:
+            return
+        self._last_pair_alignment_conflict_count = conflict_count
+        if not self._settings.align_pair_visits:
+            return
+        if conflict_count <= 0:
+            self.statusBar().showMessage("Par-justering: alla par kunde justeras.", 2500)
+            return
+        if conflict_count == 1:
+            self.statusBar().showMessage(
+                "Par-justering: 1 par hoppades över (korsande ordning mellan rutter).",
+                7000,
+            )
+            return
+        self.statusBar().showMessage(
+            f"Par-justering: {conflict_count} par hoppades över (korsande ordning mellan rutter).",
+            7000,
+        )
+
+    @Slot(bool)
     def _on_extra_time_auto_toggled(self, checked: bool):
         self._settings.extra_time_auto_place = bool(checked)
         self._autosave.mark_dirty()
@@ -1961,15 +2056,18 @@ class MainWindow(QMainWindow):
         self._autosave.mark_dirty()
 
     # ------------------------------------------------------------------
-    # Font size
+    # UI scale
     # ------------------------------------------------------------------
 
     @Slot(int)
-    def _on_font_size_changed(self, size: int):
-        self._settings.font_size = size
-        self._layout_engine.font_size = size
-        self._route_scene.set_font_size(size)
-        self._pool_scene.set_font_size(size)
+    def _on_ui_scale_percent_changed(self, percent: int):
+        clamped_percent = max(50, min(200, int(percent)))
+        self._settings.ui_scale_percent = clamped_percent
+        scaled_font_size = max(6, min(30, int(round(12 * clamped_percent / 100.0))))
+        self._settings.font_size = scaled_font_size
+        self._layout_engine.font_size = scaled_font_size
+        self._route_scene.set_font_size(scaled_font_size)
+        self._pool_scene.set_font_size(scaled_font_size)
         self._autosave.mark_dirty()
 
     # ------------------------------------------------------------------
@@ -2053,12 +2151,16 @@ class MainWindow(QMainWindow):
                     self._map_window = None
             self._db.save_settings(self._settings)
             # Sync toolbar widgets
-            self._on_font_size_changed(self._settings.font_size)
+            self._ui_scale_spin.blockSignals(True)
+            self._ui_scale_spin.setValue(max(50, min(200, int(self._settings.ui_scale_percent))))
+            self._ui_scale_spin.blockSignals(False)
+            self._on_ui_scale_percent_changed(self._settings.ui_scale_percent)
             idx = self._mode_combo.findData(self._settings.default_travel_mode)
             if idx >= 0:
                 self._mode_combo.setCurrentIndex(idx)
             self._extra_time_auto_action.setChecked(bool(self._settings.extra_time_auto_place))
             self._extra_time_spin.setValue(max(0, int(self._settings.extra_time_minutes)))
+            self._pair_align_action.setChecked(bool(self._settings.align_pair_visits))
             self._get_travel_status().configure_file_logging(
                 self._settings.file_logging_enabled,
                 self._settings.file_logging_retention_days,
@@ -2863,6 +2965,7 @@ class MainWindow(QMainWindow):
         self._pool_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._route_scene.set_extra_time_minutes(self._settings.extra_time_minutes)
         self._on_block_visibility_changed()
+        self._route_scene.set_pair_alignment_enabled(self._settings.align_pair_visits)
         self._apply_filters_and_search()
         self._sync_map_window_visits()
         self._sync_map_selection()
@@ -2992,27 +3095,42 @@ class MainWindow(QMainWindow):
         if not route_a or not entry_a or not route_b or not entry_b:
             return set()
 
-        start_a = _t2m(entry_a.start_time)
-        start_b = _t2m(entry_b.start_time)
-        if start_a == start_b:
-            return set()
-
-        if start_a < start_b:
-            early_route, early_entry, early_start = route_a, entry_a, start_a
-            late_route, late_entry, late_start = route_b, entry_b, start_b
-        else:
-            early_route, early_entry, early_start = route_b, entry_b, start_b
-            late_route, late_entry, late_start = route_a, entry_a, start_a
-
         changed_routes: set[int] = set()
 
-        late_earliest = self._pair_earliest_start(late_route, late_entry)
-        if early_start >= late_earliest:
-            if self._set_entry_start_with_gap(late_route, late_entry, early_start):
-                changed_routes.add(late_route.id)
-        else:
-            if self._set_entry_start_with_gap(early_route, early_entry, late_start):
-                changed_routes.add(early_route.id)
+        earliest_a = self._pair_earliest_start(route_a, entry_a)
+        earliest_b = self._pair_earliest_start(route_b, entry_b)
+        current_a = _t2m(entry_a.start_time)
+        current_b = _t2m(entry_b.start_time)
+        target_start = max(earliest_a, earliest_b, current_a, current_b)
+
+        if self._set_entry_start_with_gap(route_a, entry_a, target_start):
+            changed_routes.add(route_a.id)
+        if self._set_entry_start_with_gap(route_b, entry_b, target_start):
+            changed_routes.add(route_b.id)
+
+        return changed_routes
+
+    def _align_pair_to_start(self, visit_id: int, target_start: int) -> set[int]:
+        partner_id = self._pairs.get(visit_id)
+        if not partner_id:
+            return set()
+
+        route_a, entry_a = self._find_route_entry_by_visit(visit_id)
+        route_b, entry_b = self._find_route_entry_by_visit(partner_id)
+        if not route_a or not entry_a or not route_b or not entry_b:
+            return set()
+
+        changed_routes: set[int] = set()
+        resolved_target = max(
+            int(target_start),
+            self._pair_earliest_start(route_a, entry_a),
+            self._pair_earliest_start(route_b, entry_b),
+        )
+
+        if self._set_entry_start_with_gap(route_a, entry_a, resolved_target):
+            changed_routes.add(route_a.id)
+        if self._set_entry_start_with_gap(route_b, entry_b, resolved_target):
+            changed_routes.add(route_b.id)
 
         return changed_routes
 
@@ -3048,7 +3166,7 @@ class MainWindow(QMainWindow):
         for changed_route_id in changed_route_ids:
             changed_route = self._routes.get(changed_route_id)
             if changed_route:
-                self._route_scene.rebuild_route(changed_route)
+                self._route_scene.rebuild_route(changed_route, animate=False)
                 self._autosave.mark_dirty(changed_route_id)
 
     # ------------------------------------------------------------------

@@ -180,6 +180,7 @@ class Route:
     notes: str = ""
     display_order: int = 0
     route_color: Optional[str] = None
+    vertical_shift_blocks: int = 0
     # Runtime-only collections (loaded by PersistenceService)
     entries: list[RouteEntry] = field(default_factory=list, compare=False, repr=False)
     travel_segments: list[TravelSegment] = field(default_factory=list, compare=False, repr=False)
@@ -224,6 +225,7 @@ class Settings:
     default_travel_walk: int = 5
     default_travel_mode: str = "walk"
     minimum_time_between_visits: int = 2
+    ui_scale_percent: int = 100
     font_size: int = 12
     api_usage_count: int = 0
     api_usage_limit: int = 10000
@@ -232,6 +234,7 @@ class Settings:
     show_travel_blocks: bool = True
     show_space_blocks: bool = True
     show_extra_time_blocks: bool = True
+    align_pair_visits: bool = False
     debug_mode: bool = False
     file_logging_enabled: bool = True
     file_logging_retention_days: int = 30
